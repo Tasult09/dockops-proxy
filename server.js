@@ -99,8 +99,21 @@ function buildCells(colMap, data) {
 }
 
 // ─────────────────────────────────────────────────────────────
-// HEALTH CHECK
+// AUTH MIDDLEWARE
+// Set PROXY_TOKEN in Render environment variables.
+// All /api/* routes require: Authorization: Bearer <token>
+// Health check (/) and cache status are left open for monitoring.
 // ─────────────────────────────────────────────────────────────
+const PROXY_TOKEN = process.env.PROXY_TOKEN;
+app.use((req, res, next) => {
+  if (!PROXY_TOKEN) return next(); // no token set → open (dev mode)
+  if (req.path === '/' || req.path === '/api/cache/status') return next();
+  const auth = req.headers['authorization'] || '';
+  if (auth === `Bearer ${PROXY_TOKEN}`) return next();
+  res.status(401).json({ error: 'Unauthorized' });
+});
+
+
 app.get('/', (req, res) => {
   res.json({ status: 'DockOps Proxy Online', timestamp: new Date().toISOString() });
 });
