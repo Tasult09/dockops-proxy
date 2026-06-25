@@ -1,0 +1,1428 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1.0"/>
+<title>DockOps — Stabbert Marine & Industrial</title>
+<script src="https://unpkg.com/react@18/umd/react.development.js"></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<link href="https://fonts.googleapis.com/css2?family=Barlow:wght@400;500;600&family=Barlow+Condensed:wght@600;700&family=JetBrains+Mono:wght@400&display=swap" rel="stylesheet"/>
+<style>
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0;}
+html,body{background:#080c14;font-family:'Barlow',sans-serif;color:#e2e8f0;min-height:100vh;}
+button{font-family:'Barlow',sans-serif;cursor:pointer;}
+.rh:hover{background:rgba(255,255,255,0.025);}
+::-webkit-scrollbar{width:6px;height:6px;}
+::-webkit-scrollbar-track{background:#0a1020;}
+::-webkit-scrollbar-thumb{background:#1e3050;border-radius:3px;}
+#fb{background:linear-gradient(90deg,#0c2a4a,#0a1f3a);border-bottom:1px solid rgba(6,182,212,0.25);padding:9px 24px;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;}
+#fb span{font-size:12px;color:#64748b;}
+#fb strong{color:#06b6d4;}
+.fbb{background:rgba(6,182,212,0.12);color:#06b6d4;border:1px solid rgba(6,182,212,0.3);padding:3px 12px;border-radius:20px;font-size:11px;font-weight:700;letter-spacing:.05em;}
+@keyframes slideLoad{0%{transform:translateX(-110%)}100%{transform:translateX(650%)}}
+</style>
+</head>
+<body>
+<div id="fb">
+  <span><strong>DockOps</strong> &nbsp;·&nbsp; Stabbert Marine &amp; Industrial &nbsp;·&nbsp; v3.1 — Live Smartsheet Backend</span>
+  <span class="fbb">v3.1 LIVE</span>
+</div>
+<div id="root"></div>
+<script type="text/babel">
+const { useState, useEffect, useRef, Fragment } = React;
+
+// ─────────────────────────────────────────────────────────────
+// DATE HELPERS — uses live current date
+// ─────────────────────────────────────────────────────────────
+// Smartsheet returns dates as "YYYY-MM-DD" strings.
+// new Date("YYYY-MM-DD") parses as UTC midnight, which rolls back
+// one day in Pacific time. parseDate() forces local midnight instead.
+const parseDate = d => {
+  if (!d) return new Date(NaN);
+  const m = String(d).match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (m) return new Date(parseInt(m[1]), parseInt(m[2])-1, parseInt(m[3]));
+  return new Date(d);
+};
+const TODAY = new Date();
+const dBetween = (a,b)=>Math.round((parseDate(b)-parseDate(a))/86400000);
+const dFrom = d=>Math.max(0,dBetween(TODAY,d));
+const dAgo  = d=>Math.max(0,dBetween(d,TODAY));
+const fmt   = d=>parseDate(d).toLocaleDateString("en-US",{month:"short",day:"numeric",year:"numeric"});
+const fmtS  = d=>parseDate(d).toLocaleDateString("en-US",{month:"short",day:"numeric"});
+const fmtUSD= n=>n>=1000000?`$${(n/1e6).toFixed(1)}M`:`$${(n/1000).toFixed(0)}K`;
+
+// ─────────────────────────────────────────────────────────────
+// SMARTSHEET BACKEND
+// ─────────────────────────────────────────────────────────────
+const API = 'https://dockops-proxy.onrender.com';
+
+// All proxy calls go through apiFetch so the Bearer token is never forgotten
+let API_TOKEN = '';
+const apiFetch = (path, opts={}) => fetch(`${API}${path}`, {
+  ...opts,
+  headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${API_TOKEN}`, ...(opts.headers||{}) },
+});
+
+// Populated after fetch — components reference these globals
+let YARDS = {};
+let PIPELINE = [];
+let LEADS = [];
+
+// Static yard metadata (facility info not stored in Smartsheet)
+const YARD_META = {
+  ballard:{
+    label:"SMI — Ballard",
+    subtitle:"2629 NW 54th St, Seattle WA  ·  Fresh Water Port  ·  Inside Chittenden Locks",
+    moorage:"1,600ft moorage  ·  Vessels up to 450ft  ·  DD1 1,000T · DD2 500T  ·  8 Piersides  ·  SS1  ·  2 Boathouses",
+    cranes:"50T · 40T · 10T",
+    ganttRows:["DD1","DD2","SS1","PS1","PS2","PS3","PS4","PS5","PS6","PS7","PS8","BH1","BH2"],
+    ganttLabels:{DD1:"Dry Dock 1",DD2:"Dry Dock 2",SS1:"Stern-Side 1",
+                 PS1:"PS1 (16ft)",PS2:"PS2 (23.5ft)",PS3:"PS3 (26ft)",
+                 PS4:"PS4 (16ft)",PS5:"PS5 (23.5ft)",PS6:"PS6 (26ft)",
+                 PS7:"PS7 (23.5ft)",PS8:"PS8 (23.5ft)",BH1:"Boathouse 1",BH2:"Boathouse 2"},
+  },
+  anacortes:{
+    label:"SMI — Anacortes",
+    subtitle:"Anacortes, WA  ·  Salt Water Port",
+    moorage:"1,800ft moorage  ·  Vessels up to 450ft  ·  500 LT Dry Dock  ·  750T & 300T Railways  ·  50,000 sqft covered  ·  3 Harbor Slips",
+    cranes:"75T · 60T · 30T · 15T",
+    ganttRows:["LgWay","SmWay","DryDock","Outside","Slip1","Slip2","Slip3"],
+    ganttLabels:{LgWay:"Large Railway",SmWay:"Small Railway (Scrap)",DryDock:"Dry Dock",
+                 Outside:"Outside Moorage",Slip1:"Harbor Slip 1",Slip2:"Harbor Slip 2",Slip3:"Harbor Slip 3"},
+  }
+};
+
+// Anacortes: map Smartsheet full berth names → Gantt row keys
+const ANA_BERTH_KEY = {
+  'Large Railway':'LgWay','Small Railway':'SmWay','Dry Dock':'DryDock',
+  'Outside Moorage':'Outside','Harbor Slip 1':'Slip1','Harbor Slip 2':'Slip2','Harbor Slip 3':'Slip3',
+};
+
+function transformBerths(rows, yard) {
+  const yName = yard==='ballard'?'Ballard':'Anacortes';
+  return rows.filter(r=>r['Yard']===yName).map(r=>({
+    id:(r['Berth ID']||'').toLowerCase(),
+    name:r['Berth ID'],
+    fullName:r['Full Name'],
+    section:(r['Section']||'').toLowerCase(),
+    len:r['Length (ft)'],
+    beam:r['Beam (ft)'],
+    draft:r['Draft (ft)'],
+    cap:r['Capacity'],
+    status:(r['Status']||'available').toLowerCase(),
+    mapX:(r['Map X']!==null&&r['Map X']!==undefined)?Number(r['Map X']):null,
+    mapY:(r['Map Y']!==null&&r['Map Y']!==undefined)?Number(r['Map Y']):null,
+    _rowId:r._rowId,
+    // Vessel shown on card only when status != available — data is always retained in Smartsheet
+    vessel:(r['Vessel Name']&&(r['Status']||'').toLowerCase()!=='available')?{
+      name:r['Vessel Name'],loa:null,
+      wo:r['Work Order'],arrival:r['Arrival Date'],
+      departure:r['Departure Date'],notes:r['Notes'],
+    }:null,
+  }));
+}
+
+function transformSchedule(rows, yard) {
+  const yName = yard==='ballard'?'Ballard':'Anacortes';
+  return rows.filter(r=>r['Yard']===yName).map(r=>{
+    const raw=r['Berth']||'';
+    const berth=yard==='anacortes'?(ANA_BERTH_KEY[raw]||raw):raw;
+    return{vessel:r['Vessel Name'],berth,loa:r['LOA (ft)'],
+           arrival:r['Arrival Date'],departure:r['Departure Date'],_rowId:r._rowId};
+  });
+}
+
+function transformPipeline(rows) {
+  return rows.map(r=>({
+    q:parseInt((r['Quarter']||'Q0').replace('Q','')),
+    vessel:r['Vessel Name'],
+    rep:r['Rep']||'—',
+    value:Number(r['Value ($)'])||0,
+    loc:r['Yard']==='Off Site'?'Off Site':`${r['Yard']||''} — ${r['Berth']||''}`,
+    pop:r['Period']||'—',
+    status:(r['Status']||'').toLowerCase(),
+    notes:r['Notes']||'',
+    _rowId:r._rowId,
+  }));
+}
+
+function transformLeads(rows) {
+  return rows.map(r=>({
+    _rowId:      r._rowId,
+    firstName:   r['First Name']||'',
+    lastName:    r['Last Name']||'',
+    company:     r['Company / Vessel Owner']||r['Company']||'',
+    email:       r['Email Address']||r['Email']||'',
+    phone:       r['Phone Number']||r['Phone']||'',
+    vessel:      r['Vessel Name']||'',
+    vesselType:  r['Vessel Type']||'',
+    yard:        r['Preferred Yard']||'No Preference',
+    loa:         r['LOA (ft)']||r['LOA']||'',
+    beam:        r['Beam (ft)']||r['Beam']||'',
+    draft:       r['Draft (ft)']||r['Draft']||'',
+    arrival:     r['Estimated Arrival']||'',
+    duration:    r['Est. Duration (days)']||r['Duration']||'',
+    // Try multiple possible column names for services
+    services:    r['Services Needed']||r['Services Requested']||r['Services']||r['Work Type']||'',
+    description: r['Project Description']||'',
+    budget:      r['Estimated Budget']||'',
+    assignedRep: r['Assigned Rep']||r['Rep']||'',
+    status:      r['Lead Status']||'New — Needs Review',
+    lostReason:  r['Lost Reason']||'',
+    submitted:   r['Submission Date']||r['Date Submitted']||r['Created']||'',
+  }))
+  // Sort newest first by Submission Date, fall back to rowId
+  .sort((a,b)=>{
+    const da=a.submitted?parseDate(a.submitted):new Date(0);
+    const db=b.submitted?parseDate(b.submitted):new Date(0);
+    if(!isNaN(db)&&!isNaN(da)&&db-da!==0) return db-da;
+    return b._rowId-a._rowId;
+  });
+}
+
+async function loadFromSmartsheet() {
+  const [bR,sR,pR]=await Promise.all([
+    apiFetch('/api/berths'),
+    apiFetch('/api/schedule'),
+    apiFetch('/api/pipeline'),
+  ]);
+  if(!bR.ok||!sR.ok||!pR.ok) throw new Error('Could not reach the DockOps proxy server.');
+  const [bD,sD,pD]=await Promise.all([bR.json(),sR.json(),pR.json()]);
+  YARDS={
+    ballard:  {...YARD_META.ballard,  docks:transformBerths(bD,'ballard'),  schedule:transformSchedule(sD,'ballard')},
+    anacortes:{...YARD_META.anacortes,docks:transformBerths(bD,'anacortes'),schedule:transformSchedule(sD,'anacortes')},
+  };
+  PIPELINE=transformPipeline(pD);
+  // Leads are optional — don't fail if SHEET_LEADS not yet configured in proxy
+  try{
+    const lR=await apiFetch('/api/leads');
+    if(lR.ok) LEADS=transformLeads(await lR.json());
+  }catch(e){console.warn('Leads endpoint not available:',e);}
+}
+
+// ─────────────────────────────────────────────────────────────
+// STYLE CONFIGS
+// ─────────────────────────────────────────────────────────────
+const SC={
+  occupied:   {label:"Occupied",   color:"#f59e0b",bg:"rgba(245,158,11,0.15)", border:"rgba(245,158,11,0.35)"},
+  available:  {label:"Available",  color:"#10b981",bg:"rgba(16,185,129,0.15)", border:"rgba(16,185,129,0.35)"},
+  reserved:   {label:"Reserved",   color:"#60a5fa",bg:"rgba(96,165,250,0.15)", border:"rgba(96,165,250,0.35)"},
+  maintenance:{label:"Maintenance",color:"#f87171",bg:"rgba(248,113,113,0.15)",border:"rgba(248,113,113,0.35)"},
+  staging:    {label:"DD2 Staging",color:"#a78bfa",bg:"rgba(167,139,250,0.15)",border:"rgba(167,139,250,0.35)"},
+};
+const PSC={
+  won:       {label:"Closed – Won",  color:"#10b981",bg:"rgba(16,185,129,0.12)", border:"rgba(16,185,129,0.3)"},
+  lost:      {label:"Closed – Lost", color:"#f87171",bg:"rgba(248,113,113,0.12)",border:"rgba(248,113,113,0.3)"},
+  estimating:{label:"Estimating",    color:"#f59e0b",bg:"rgba(245,158,11,0.12)", border:"rgba(245,158,11,0.3)"},
+  lead:      {label:"Lead",          color:"#60a5fa",bg:"rgba(96,165,250,0.12)", border:"rgba(96,165,250,0.3)"},
+};
+const VCOL={
+  "Hudson":"#1d4ed8","Frontier Explorer":"#7c3aed","Frontier Spirit":"#b45309",
+  "Kimberly C":"#047857","Scorpio":"#155e75","James T Quigg":"#065f46",
+  "Mist Cove":"#9d174d","Harry M":"#92400e","Gladys M":"#1e3a5f",
+  "Polar Wind":"#4c1d95","Nordic Star":"#134e4a","Island Chief":"#3b0764",
+  "Katiana":"#1c3461","Iron Don":"#7f1d1d","Guemes Island Ferry":"#064e3b",
+  "Annabelle":"#713f12","Quigg Barges":"#374151","Charlie Wells":"#1e1b4b",
+};
+// Named vessels use curated colors; anything new gets a deterministic hue
+// hsl(..., 62%, 36%) stays visible on dark bg with white bar text
+const vColor=n=>{
+  if(VCOL[n])return VCOL[n];
+  let h=0;
+  for(let i=0;i<n.length;i++){h=Math.imul(31,h)+n.charCodeAt(i)|0;}
+  return`hsl(${Math.abs(h)%360},62%,36%)`;
+};
+
+// ─────────────────────────────────────────────────────────────
+// SHARED COMPONENTS
+// ─────────────────────────────────────────────────────────────
+function Badge({status}){
+  const s=SC[status]||SC.available;
+  return <span style={{background:s.bg,color:s.color,border:`1px solid ${s.border}`,padding:"3px 10px",borderRadius:"5px",fontSize:"12px",fontWeight:700,whiteSpace:"nowrap"}}>{s.label}</span>;
+}
+function PBadge({status}){
+  const s=PSC[status];
+  if(!s)return null;
+  return <span style={{background:s.bg,color:s.color,border:`1px solid ${s.border}`,padding:"2px 8px",borderRadius:"4px",fontSize:"11px",fontWeight:700,whiteSpace:"nowrap"}}>{s.label}</span>;
+}
+function ProgressBar({arrival,departure}){
+  const pct=Math.min(100,Math.round((dAgo(arrival)/Math.max(1,dBetween(arrival,departure)))*100));
+  return <div style={{height:"4px",background:"rgba(255,255,255,0.08)",borderRadius:"2px",overflow:"hidden"}}><div style={{height:"100%",width:`${pct}%`,background:"linear-gradient(90deg,#d97706,#f59e0b)",borderRadius:"2px"}}/></div>;
+}
+function SecH({label,sub}){
+  return(
+    <div style={{display:"flex",alignItems:"center",gap:"10px",marginBottom:"14px"}}>
+      <div style={{width:"3px",height:"20px",background:"#06b6d4",borderRadius:"2px"}}/>
+      <div>
+        <h2 style={{fontFamily:"'Barlow Condensed',sans-serif",fontSize:"20px",fontWeight:700,color:"#e2e8f0",lineHeight:1}}>{label}</h2>
+        {sub&&<div style={{fontSize:"11px",color:"#475569",marginTop:"2px"}}>{sub}</div>}
+      </div>
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────
+// BALLARD YARD MAP — fully draggable
+// ─────────────────────────────────────────────────────────────
+function BallardYardMap(){
+  const svgRef=useRef(null);
+  const VW=920, VH=360;
+  const SIZES={
+    dd1:[210,45], dd2:[115,50], ss1:[115,44],
+    ps1:[125,44], ps2:[125,44], ps3:[125,44],
+    ps4:[138,44], ps5:[138,44], ps6:[138,44],
+    ps7:[115,44], ps8:[115,44],
+    bh1:[92,46],  bh2:[92,46],
+  };
+  const DEFAULT_POS={
+    ps3:{x:230,y:20}, ps2:{x:358,y:20}, ps1:{x:486,y:20},
+    ps6:{x:230,y:120},ps5:{x:371,y:120},ps4:{x:512,y:120},
+    ss1:{x:658,y:168},
+    dd1:{x:10, y:129},
+    dd2:{x:658,y:220},
+    ps8:{x:230,y:274},ps7:{x:348,y:274},
+    bh2:{x:654,y:274},bh1:{x:750,y:274},
+  };
+  // Merge Smartsheet-saved positions (Map X / Map Y) over defaults
+  const savedPos=()=>{
+    const overrides={};
+    (YARDS.ballard?.docks||[]).forEach(d=>{
+      if(d.mapX!==null&&d.mapY!==null) overrides[d.id]={x:d.mapX,y:d.mapY};
+    });
+    return{...DEFAULT_POS,...overrides};
+  };
+  const [pos,setPos]=useState(savedPos);
+  const [drag,setDrag]=useState(null);
+  const [hov,setHov] =useState(null);
+  const GRN={fill:"#14532d",stroke:"#22c55e"};
+  const YEL={fill:"#713f12",stroke:"#f59e0b"};
+  const AMB={fill:"#78350f",stroke:"#d97706"};
+  const TEL={fill:"#164e63",stroke:"#06b6d4"};
+  const RED={fill:"#7f1d1d",stroke:"#f87171"};
+  const COL={dd1:YEL,dd2:AMB,ss1:GRN,ps1:GRN,ps2:GRN,ps3:GRN,ps4:GRN,ps5:GRN,ps6:GRN,ps7:TEL,ps8:TEL,bh1:RED,bh2:RED};
+  const META={
+    dd1:{n:"DD1 — Dry Dock 1",   s:"200ft × 42'10\" · 1,000T · 16ft draft"},
+    dd2:{n:"DD2 — Dry Dock 2",   s:"100ft × 37'6\" · 500T · 12ft draft"},
+    ss1:{n:"SS1 — Stern-Side 1", s:"100ft · 16ft max draft · DD2 compatible"},
+    ps1:{n:"PS1",s:"120ft · 16ft draft"},  ps2:{n:"PS2",s:"120ft · 23.5ft draft"},
+    ps3:{n:"PS3",s:"120ft · 26ft draft"},  ps4:{n:"PS4",s:"133ft · 16ft draft"},
+    ps5:{n:"PS5",s:"133ft · 23.5ft draft"},ps6:{n:"PS6",s:"133ft · 26ft draft"},
+    ps7:{n:"PS7",s:"109ft · 23.5ft"},      ps8:{n:"PS8",s:"109ft · 23.5ft"},
+    bh1:{n:"BH1",s:"82.5ft × 40ft · 12ft draft"},
+    bh2:{n:"BH2",s:"82.5ft × 40ft · 17ft draft"},
+  };
+  const xy=(e)=>{const r=svgRef.current.getBoundingClientRect();return{x:(e.clientX-r.left)*(VW/r.width),y:(e.clientY-r.top)*(VH/r.height)};};
+  const [saving,setSaving]=useState(null); // berth id currently being saved
+  const dn=(id,e)=>{e.preventDefault();const{x,y}=xy(e);setDrag({id,ox:x-pos[id].x,oy:y-pos[id].y});};
+  const mv=(e)=>{if(!drag)return;const{x,y}=xy(e);const[w,h]=SIZES[drag.id];setPos(p=>({...p,[drag.id]:{x:Math.max(0,Math.min(VW-w,x-drag.ox)),y:Math.max(0,Math.min(VH-h,y-drag.oy))}}));};
+  const up=()=>{
+    if(drag){
+      const id=drag.id;
+      const{x,y}=pos[id];
+      const dock=(YARDS.ballard?.docks||[]).find(d=>d.id===id);
+      if(dock?._rowId){
+        setSaving(id);
+        apiFetch(`/api/berths/${dock._rowId}`,{
+          method:'PUT',
+          body:JSON.stringify({'Map X':x,'Map Y':y})
+        }).finally(()=>setTimeout(()=>setSaving(null),1200));
+      }
+    }
+    setDrag(null);
+  };
+  const DL={stroke:"rgba(255,255,255,0.4)",strokeWidth:"1",fill:"none"};
+  const TK={stroke:"rgba(255,255,255,0.4)",strokeWidth:"1"};
+  const DT={fontSize:"10",fill:"rgba(255,255,255,0.55)",fontFamily:"Barlow Condensed, sans-serif",textAnchor:"middle"};
+  const tY=20,mY=120,bY=274,rH=44;
+  const Berth=({id})=>{
+    const{x,y}=pos[id];const[w,h]=SIZES[id];const c=COL[id];const{n,s}=META[id];
+    const isD=drag?.id===id,isH=hov===id;
+    const short=n.split(" — ")[0].split(" · ")[0];
+    const isSaving=saving===id;
+    return(
+      <g onMouseDown={e=>dn(id,e)} onMouseEnter={()=>{if(!drag)setHov(id);}} onMouseLeave={()=>setHov(null)} style={{cursor:isD?"grabbing":"grab"}}>
+        {isD&&<rect x={x+4} y={y+4} width={w} height={h} fill="rgba(0,0,0,0.35)" rx="4"/>}
+        <rect x={x} y={y} width={w} height={h}
+          fill={isSaving?"rgba(16,185,129,0.18)":isD?c.stroke+"44":isH?c.stroke+"28":c.fill}
+          stroke={isSaving?"#10b981":c.stroke} strokeWidth={isD?"2.5":isH?"2":"1.5"}
+          strokeDasharray={isD?"5,3":"none"} rx="4"
+          style={{transition:isD?"none":"all 0.12s"}}/>
+        <text x={x+w/2} y={y+h/2-(h>36?6:3)} textAnchor="middle"
+          fontSize={w<100?"10":"11"} fontWeight="700"
+          fontFamily="Barlow Condensed, sans-serif" fill="#e2e8f0" style={{pointerEvents:"none"}}>{short}</text>
+        {h>36&&<text x={x+w/2} y={y+h/2+(h>36?8:3)} textAnchor="middle"
+          fontSize="9" fontFamily="Barlow, sans-serif" fill="rgba(255,255,255,0.45)" style={{pointerEvents:"none"}}>
+          {s.split(" · ")[0]} · {s.split(" · ")[1]}
+        </text>}
+        <circle cx={x+w-8} cy={y+8}  r="1.3" fill={c.stroke+"77"} style={{pointerEvents:"none"}}/>
+        <circle cx={x+w-8} cy={y+13} r="1.3" fill={c.stroke+"77"} style={{pointerEvents:"none"}}/>
+        <circle cx={x+w-8} cy={y+18} r="1.3" fill={c.stroke+"77"} style={{pointerEvents:"none"}}/>
+      </g>
+    );
+  };
+  return(
+    <div style={{background:"#080c14",border:"1px solid rgba(255,255,255,0.08)",borderRadius:"10px",padding:"16px",marginBottom:"24px",position:"relative"}}>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:"10px"}}>
+        <span style={{fontSize:"11px",fontWeight:700,color:"#475569",letterSpacing:"0.1em"}}>BALLARD YARD LAYOUT  ·  SMI SEATTLE</span>
+        <span style={{fontSize:"10px",color:"#64748b",display:"flex",alignItems:"center",gap:"6px"}}>
+          {saving
+            ?<span style={{background:"rgba(16,185,129,0.12)",border:"1px solid rgba(16,185,129,0.35)",borderRadius:"3px",padding:"2px 8px",color:"#10b981",fontWeight:600}}>✓ Position saved</span>
+            :<span style={{background:"rgba(245,158,11,0.12)",border:"1px dashed rgba(245,158,11,0.4)",borderRadius:"3px",padding:"2px 8px",color:"#f59e0b",fontWeight:600}}>⠿ Drag to reposition · auto-saves</span>
+          }
+        </span>
+      </div>
+      <svg ref={svgRef} viewBox={`0 0 ${VW} ${VH}`} style={{width:"100%",height:"auto",userSelect:"none"}}
+        onMouseMove={mv} onMouseUp={up} onMouseLeave={up}>
+        <line x1={230} y1={tY-8}      x2={611} y2={tY-8}       {...DL}/>
+        <line x1={230} y1={tY-12}     x2={230} y2={tY-4}       {...TK}/>
+        <line x1={611} y1={tY-12}     x2={611} y2={tY-4}       {...TK}/>
+        <text x={420} y={tY-10} {...DT}>362'</text>
+        <line x1={230} y1={mY+rH+8}   x2={650} y2={mY+rH+8}   {...DL}/>
+        <line x1={230} y1={mY+rH+4}   x2={230} y2={mY+rH+12}  {...TK}/>
+        <line x1={650} y1={mY+rH+4}   x2={650} y2={mY+rH+12}  {...TK}/>
+        <text x={440} y={mY+rH+19} {...DT}>401'</text>
+        <line x1={216} y1={mY+rH+18}  x2={216} y2={bY-4}       {...DL}/>
+        <line x1={210} y1={mY+rH+18}  x2={222} y2={mY+rH+18}   {...TK}/>
+        <line x1={210} y1={bY-4}      x2={222} y2={bY-4}        {...TK}/>
+        <text x={204} y={(mY+rH+18+bY-4)/2+4} {...DT} transform={`rotate(-90,204,${(mY+rH+18+bY-4)/2+4})`}>186'</text>
+        <line x1={230} y1={bY+rH+8}   x2={463} y2={bY+rH+8}   {...DL}/>
+        <line x1={230} y1={bY+rH+4}   x2={230} y2={bY+rH+12}  {...TK}/>
+        <line x1={463} y1={bY+rH+4}   x2={463} y2={bY+rH+12}  {...TK}/>
+        <text x={346} y={bY+rH+19} {...DT}>218'</text>
+        {/* North Waterway Span — gap between PS1–PS3 and PS4–PS6 rows */}
+        <line x1={632} y1={tY+rH}     x2={632} y2={mY}         {...DL}/>
+        <line x1={626} y1={tY+rH}     x2={638} y2={tY+rH}      {...TK}/>
+        <line x1={626} y1={mY}        x2={638} y2={mY}          {...TK}/>
+        <text x={628} y={(tY+rH+mY)/2+4} {...DT} transform={`rotate(-90,628,${(tY+rH+mY)/2+4})`}>~36'</text>
+        {["ps3","ps2","ps1","ps6","ps5","ps4","ps8","ps7","bh2","bh1","dd1","ss1","dd2"].map(id=><Berth key={id} id={id}/>)}
+        {[{c:GRN.stroke,l:"Pier-Side / SS1"},{c:YEL.stroke,l:"DD1"},{c:AMB.stroke,l:"DD2"},{c:TEL.stroke,l:"PS7/PS8"},{c:RED.stroke,l:"Boathouses"}].map((x,i)=>(
+          <g key={x.l} transform={`translate(${10+i*158},${VH-14})`}>
+            <rect width="10" height="10" fill={x.c+"22"} stroke={x.c} strokeWidth="1" rx="2"/>
+            <text x="14" y="9" fontSize="9" fill="rgba(255,255,255,0.35)" fontFamily="Barlow, sans-serif">{x.l}</text>
+          </g>
+        ))}
+      </svg>
+      {hov&&!drag&&(()=>{const{n,s}=META[hov];return(
+        <div style={{position:"absolute",top:"44px",right:"20px",background:"#1a2d45",border:"1px solid rgba(255,255,255,0.13)",borderRadius:"7px",padding:"8px 14px",pointerEvents:"none",boxShadow:"0 6px 20px rgba(0,0,0,0.5)",zIndex:50}}>
+          <div style={{fontSize:"13px",fontWeight:700,color:"#e2e8f0"}}>{n}</div>
+          <div style={{fontSize:"11px",color:"#64748b",marginTop:"2px"}}>{s}</div>
+        </div>
+      );})()}
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────
+// DOCK CARD — inline editable, writes back to Smartsheet
+// ─────────────────────────────────────────────────────────────
+function DockCard({dock, onRefresh}){
+  const{name,fullName,section,cap,len,beam,draft,status,vessel,scrapsOnly,dualUse,_rowId}=dock;
+  const[editing,setEditing]=useState(false);
+  const[saving,setSaving]  =useState(false);
+  const[saveErr,setSaveErr]=useState('');
+  const[form,setForm]      =useState({});
+
+  const s=SC[status]||SC.available;
+  const sub=
+    section==="drydock"  ?`Dry Dock · ${cap} · ${len}ft × ${beam}ft · ${draft}ft draft`:
+    section==="railway"  ?`Railway · ${cap} · ${len}ft × ${beam}ft · ${draft}ft draft`:
+    section==="sternside"?`Stern-Side · ${len}ft · ${draft}ft max draft`:
+    section==="pier"     ?`Pier-Side · ${len}ft · ${draft?draft+'ft draft':''}`:
+    section==="slip"     ?`Harbor Slip · ${len}ft`:`Boathouse · ${len}ft × ${beam}ft · ${draft}ft draft`;
+
+  const capStatus=v=>({available:'Available',occupied:'Occupied',reserved:'Reserved',maintenance:'Maintenance',staging:'Staging'}[v]||v);
+  const toInputDate=d=>{if(!d)return'';const dt=parseDate(d);if(isNaN(dt))return'';const mm=String(dt.getMonth()+1).padStart(2,'0');const dd=String(dt.getDate()).padStart(2,'0');return`${dt.getFullYear()}-${mm}-${dd}`;};
+
+  const openEdit=()=>{
+    setForm({
+      status:status||'available',
+      vesselName:vessel?.name||'',
+      arrival:toInputDate(vessel?.arrival),
+      departure:toInputDate(vessel?.departure),
+      wo:vessel?.wo||'',
+      notes:vessel?.notes||'',
+    });
+    setEditing(true);
+  };
+
+  const handleSave=async()=>{
+    setSaving(true);setSaveErr('');
+    // When setting to Available: only write Status — vessel history stays intact in Smartsheet
+    const payload={Status:capStatus(form.status)};
+    if(form.status!=='available'){
+      payload['Vessel Name'] =form.vesselName;
+      payload['Arrival Date']=form.arrival;
+      payload['Departure Date']=form.departure;
+      payload['Work Order']  =form.wo;
+      payload['Notes']       =form.notes;
+    }
+    try{
+      const r=await apiFetch(`/api/berths/${_rowId}`,{method:'PUT',body:JSON.stringify(payload)});
+      if(r.ok){setEditing(false);onRefresh();}
+      else{const d=await r.json().catch(()=>({}));setSaveErr(d.error||`Save failed (${r.status}) — check Smartsheet PICKLIST values`);}
+    }catch(e){setSaveErr(e.message||'Save failed — check your connection');}
+    finally{setSaving(false);}
+  };
+
+  const INP={background:'rgba(255,255,255,0.05)',border:'1px solid rgba(255,255,255,0.1)',borderRadius:'6px',color:'#e2e8f0',padding:'7px 10px',fontSize:'13px',width:'100%',fontFamily:"'Barlow',sans-serif",outline:'none'};
+  const LBL={fontSize:'11px',color:'#64748b',marginBottom:'4px',display:'block'};
+  const CARD={background:'#0d1728',borderRadius:'10px',padding:'18px',display:'flex',flexDirection:'column',gap:'12px'};
+
+  if(editing) return(
+    <div style={{...CARD,border:`1px solid ${s.color}55`,borderLeft:`3px solid ${s.color}`}}>
+      <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start'}}>
+        <div>
+          <div style={{fontFamily:"'Barlow Condensed',sans-serif",fontSize:'17px',fontWeight:700,color:'#e2e8f0'}}>{fullName||name}</div>
+          <div style={{fontSize:'11px',color:'#475569',marginTop:'3px'}}>{sub}</div>
+        </div>
+        <span style={{fontSize:'10px',fontWeight:700,color:'#06b6d4',letterSpacing:'0.08em'}}>EDITING</span>
+      </div>
+
+      {/* Status */}
+      <div>
+        <label style={LBL}>Status</label>
+        <select value={form.status} onChange={e=>setForm(f=>({...f,status:e.target.value}))}
+          style={{...INP,cursor:'pointer',background:'#0f2044',color:'#e2e8f0'}}>
+          <option value="available"   style={{background:'#0f2044',color:'#e2e8f0'}}>Available</option>
+          <option value="occupied"    style={{background:'#0f2044',color:'#e2e8f0'}}>Occupied</option>
+          <option value="reserved"    style={{background:'#0f2044',color:'#e2e8f0'}}>Reserved</option>
+          <option value="maintenance" style={{background:'#0f2044',color:'#e2e8f0'}}>Maintenance</option>
+          <option value="staging"     style={{background:'#0f2044',color:'#e2e8f0'}}>DD2 Staging</option>
+        </select>
+      </div>
+
+      {/* Vessel fields hidden when available — data retained in Smartsheet */}
+      {form.status==='available'
+        ?<div style={{background:'rgba(16,185,129,0.06)',border:'1px solid rgba(16,185,129,0.15)',borderRadius:'7px',padding:'10px 14px',fontSize:'12px',color:'#475569',lineHeight:1.5}}>
+          Vessel history will be retained in Smartsheet for future sales reference.
+         </div>
+        :<>
+          <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:'10px'}}>
+            <div>
+              <label style={LBL}>Vessel Name</label>
+              <input style={INP} value={form.vesselName} placeholder="Vessel name"
+                onChange={e=>setForm(f=>({...f,vesselName:e.target.value}))}/>
+            </div>
+            <div>
+              <label style={LBL}>Work Order</label>
+              <input style={INP} value={form.wo} placeholder="WO #"
+                onChange={e=>setForm(f=>({...f,wo:e.target.value}))}/>
+            </div>
+          </div>
+          <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:'10px'}}>
+            <div>
+              <label style={LBL}>Arrival Date</label>
+              <input type="date" style={INP} value={form.arrival}
+                onChange={e=>setForm(f=>({...f,arrival:e.target.value}))}/>
+            </div>
+            <div>
+              <label style={LBL}>Departure Date</label>
+              <input type="date" style={INP} value={form.departure}
+                onChange={e=>setForm(f=>({...f,departure:e.target.value}))}/>
+            </div>
+          </div>
+          <div>
+            <label style={LBL}>Notes</label>
+            <textarea style={{...INP,resize:'vertical',minHeight:'64px'}} value={form.notes} placeholder="Work scope, notes…"
+              onChange={e=>setForm(f=>({...f,notes:e.target.value}))}/>
+          </div>
+        </>
+      }
+
+      {/* Save error */}
+      {saveErr&&<div style={{background:'rgba(248,113,113,0.1)',border:'1px solid rgba(248,113,113,0.3)',borderRadius:'6px',padding:'8px 12px',fontSize:'12px',color:'#f87171'}}>{saveErr}</div>}
+
+      {/* Actions */}
+      <div style={{display:'flex',gap:'8px',justifyContent:'flex-end',paddingTop:'2px'}}>
+        <button onClick={()=>setEditing(false)} disabled={saving}
+          style={{background:'transparent',color:'#64748b',border:'1px solid rgba(255,255,255,0.1)',padding:'7px 16px',borderRadius:'6px',fontSize:'13px',fontWeight:500,cursor:'pointer'}}>
+          Cancel
+        </button>
+        <button onClick={handleSave} disabled={saving}
+          style={{background:saving?'rgba(6,182,212,0.06)':'rgba(6,182,212,0.14)',color:'#06b6d4',border:'1px solid rgba(6,182,212,0.35)',padding:'7px 20px',borderRadius:'6px',fontSize:'13px',fontWeight:600,cursor:saving?'default':'pointer'}}>
+          {saving?'Saving…':'Save to Smartsheet'}
+        </button>
+      </div>
+    </div>
+  );
+
+  // ── View mode ──────────────────────────────────────────────
+  return(
+    <div style={{...CARD,border:'1px solid rgba(255,255,255,0.07)',borderLeft:`3px solid ${s.color}`}}>
+      <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start',gap:'10px'}}>
+        <div>
+          <div style={{fontFamily:"'Barlow Condensed',sans-serif",fontSize:'17px',fontWeight:700,color:'#e2e8f0'}}>{fullName||name}</div>
+          <div style={{fontSize:'11px',color:'#475569',marginTop:'3px'}}>
+            {sub}
+            {scrapsOnly&&<span style={{marginLeft:'7px',background:'rgba(248,113,113,0.12)',color:'#f87171',border:'1px solid rgba(248,113,113,0.25)',padding:'1px 6px',borderRadius:'3px',fontSize:'10px',fontWeight:700}}>SCRAP ONLY</span>}
+            {dualUse&&<span style={{marginLeft:'7px',background:'rgba(167,139,250,0.12)',color:'#a78bfa',border:'1px solid rgba(167,139,250,0.25)',padding:'1px 6px',borderRadius:'3px',fontSize:'10px',fontWeight:700}}>DD2 COMPATIBLE</span>}
+          </div>
+        </div>
+        <div style={{display:'flex',alignItems:'center',gap:'8px',flexShrink:0}}>
+          <Badge status={status}/>
+          <button onClick={openEdit} title="Edit berth"
+            style={{background:'rgba(255,255,255,0.04)',border:'1px solid rgba(255,255,255,0.09)',borderRadius:'6px',color:'#64748b',width:'30px',height:'30px',display:'flex',alignItems:'center',justifyContent:'center',fontSize:'15px',cursor:'pointer',padding:0,flexShrink:0}}>
+            ✎
+          </button>
+        </div>
+      </div>
+      {!vessel&&status==="available"&&<div style={{color:'#10b981',fontSize:'12px'}}>✓ Ready for vessel assignment</div>}
+      {vessel&&<>
+        <div>
+          <div style={{fontFamily:"'Barlow Condensed',sans-serif",fontSize:'21px',fontWeight:700,color:'#f1f5f9'}}>{vessel.name}</div>
+          {vessel.loa&&<div style={{fontSize:'11px',color:'#94a3b8',marginTop:'2px'}}>LOA: {vessel.loa}ft</div>}
+        </div>
+        <div style={{display:'flex',gap:'10px'}}>
+          <div style={{background:'rgba(6,182,212,0.08)',border:'1px solid rgba(6,182,212,0.2)',borderRadius:'7px',padding:'8px 12px',flex:1}}>
+            <div style={{fontSize:'10px',color:'#06b6d4',fontWeight:700,letterSpacing:'0.08em',marginBottom:'3px'}}>ARRIVAL</div>
+            <div style={{fontFamily:"'Barlow Condensed',sans-serif",fontSize:'15px',fontWeight:600,color:'#e2e8f0'}}>{fmt(vessel.arrival)}</div>
+            <div style={{fontSize:'11px',color:'#475569',marginTop:'2px'}}>{dAgo(vessel.arrival)}d in dock</div>
+          </div>
+          <div style={{background:'rgba(245,158,11,0.08)',border:'1px solid rgba(245,158,11,0.2)',borderRadius:'7px',padding:'8px 12px',flex:1}}>
+            <div style={{fontSize:'10px',color:'#f59e0b',fontWeight:700,letterSpacing:'0.08em',marginBottom:'3px'}}>DEPARTURE</div>
+            <div style={{fontFamily:"'Barlow Condensed',sans-serif",fontSize:'15px',fontWeight:600,color:'#e2e8f0'}}>{fmt(vessel.departure)}</div>
+            <div style={{fontSize:'11px',color:'#475569',marginTop:'2px'}}>{dFrom(vessel.departure)}d remaining</div>
+          </div>
+        </div>
+        <ProgressBar arrival={vessel.arrival} departure={vessel.departure}/>
+        {vessel.wo&&vessel.wo!=="—"&&<div style={{fontSize:'11px',color:'#475569',fontFamily:"'JetBrains Mono',monospace"}}>{vessel.wo}</div>}
+        {vessel.notes&&<div style={{fontSize:'12px',color:'#94a3b8',lineHeight:'1.55',borderTop:'1px solid rgba(255,255,255,0.05)',paddingTop:'10px'}}>{vessel.notes}</div>}
+      </>}
+    </div>
+  );
+}
+
+
+// ─────────────────────────────────────────────────────────────
+// DRAFT LEGEND
+// ─────────────────────────────────────────────────────────────
+function DraftLegend(){
+  const zones=[
+    {label:"Inner Berths — PS1, PS4, SS1, DD1",draft:"16ft",  color:"#f59e0b"},
+    {label:"Mid-Harbor — PS2, PS5, PS7, PS8",  draft:"23.5ft",color:"#06b6d4"},
+    {label:"End of Pier — PS3, PS6",           draft:"26ft",  color:"#10b981"},
+    {label:"DD2 / Boathouse 1",                draft:"12ft",  color:"#f87171"},
+    {label:"Boathouse 2",                      draft:"17ft",  color:"#a78bfa"},
+  ];
+  return(
+    <div style={{background:"#0a1828",border:"1px solid rgba(255,255,255,0.06)",borderRadius:"8px",padding:"12px 16px",marginBottom:"20px"}}>
+      <div style={{fontSize:"10px",fontWeight:700,color:"#334155",letterSpacing:"0.1em",marginBottom:"8px"}}>BALLARD DEPTH PROFILE</div>
+      <div style={{display:"flex",flexWrap:"wrap",gap:"12px"}}>
+        {zones.map(z=>(
+          <div key={z.label} style={{display:"flex",alignItems:"center",gap:"7px"}}>
+            <div style={{width:"28px",height:"4px",borderRadius:"2px",background:z.color}}/>
+            <span style={{fontSize:"11px",color:"#64748b"}}>{z.label}</span>
+            <span style={{fontSize:"11px",fontWeight:700,color:z.color,fontFamily:"'JetBrains Mono',monospace"}}>{z.draft}</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────
+// DASHBOARD
+// ─────────────────────────────────────────────────────────────
+function Dashboard({yard, onRefresh, refreshKey}){
+  const Y=YARDS[yard],docks=Y.docks;
+  const cnt={
+    total:docks.length,
+    occ:  docks.filter(d=>d.status==="occupied").length,
+    avail:docks.filter(d=>d.status==="available").length,
+    res:  docks.filter(d=>d.status==="reserved").length,
+    maint:docks.filter(d=>d.status==="maintenance").length,
+  };
+  const stats=[
+    {label:"Total Berths",value:cnt.total,dot:null},
+    {label:"Occupied",    value:cnt.occ,  dot:"#f59e0b"},
+    {label:"Available",   value:cnt.avail,dot:"#10b981"},
+    {label:"Reserved",    value:cnt.res,  dot:"#60a5fa"},
+    {label:"Maintenance", value:cnt.maint,dot:"#f87171"},
+  ];
+  const secs=yard==="ballard"?[
+    {key:"drydock",   label:"Dry Docks",        sub:"DD1: 200ft · 1,000T · 16ft  ·  DD2: 100ft · 500T · 12ft"},
+    {key:"sternside", label:"Stern-Side",        sub:"SS1: 100ft · 16ft max draft · Warehouse-to-aft-deck access · DD2 compatible"},
+    {key:"pier",      label:"Pier-Side Berths",  sub:"PS1–PS3: 362ft  ·  PS4–PS6: 401ft  ·  PS7–PS8: 218ft"},
+    {key:"boathouse", label:"Boathouses",        sub:"BH1: 82.5ft · 12ft  ·  BH2: 82.5ft · 17ft"},
+  ]:[
+    {key:"railway",  label:"Railways",       sub:"Large: 750T · 130×50ft · 12.5ft draft  ·  Small: 300T · 90×30ft · 10ft (Scrap Only)"},
+    {key:"drydock",  label:"Dry Dock",       sub:"500 LT"},
+    {key:"pier",     label:"Outside Moorage",sub:"580ft total"},
+    {key:"slip",     label:"Harbor Slips",   sub:"Slip 1: 190ft  ·  Slip 2: 110ft  ·  Slip 3: 150ft"},
+  ];
+  return(
+    <div>
+      <div style={{background:"#0a1828",border:"1px solid rgba(255,255,255,0.06)",borderRadius:"8px",padding:"10px 16px",marginBottom:"16px"}}>
+        <div style={{fontSize:"12px",color:"#475569",marginBottom:"3px"}}>{Y.subtitle}</div>
+        <div style={{fontSize:"11px",color:"#2d4a6a"}}>{Y.moorage}  ·  Cranes: {Y.cranes}</div>
+      </div>
+      {yard==="ballard"&&<DraftLegend/>}
+      <div style={{display:"grid",gridTemplateColumns:"repeat(5,1fr)",gap:"10px",marginBottom:"20px"}}>
+        {stats.map(({label,value,dot})=>(
+          <div key={label} style={{background:"#0d1728",border:"1px solid rgba(255,255,255,0.07)",borderRadius:"10px",padding:"16px 18px"}}>
+            <div style={{display:"flex",alignItems:"center",gap:"6px",marginBottom:"8px"}}>
+              {dot&&<span style={{width:"7px",height:"7px",borderRadius:"50%",background:dot,display:"inline-block"}}/>}
+              <span style={{fontSize:"11px",color:"#64748b"}}>{label}</span>
+            </div>
+            <div style={{fontFamily:"'Barlow Condensed',sans-serif",fontSize:"38px",fontWeight:700,color:"#f1f5f9",lineHeight:1}}>{value}</div>
+          </div>
+        ))}
+      </div>
+      {yard==="ballard"&&<BallardYardMap/>}
+      {secs.map(({key,label,sub})=>{
+        const items=docks.filter(d=>d.section===key);
+        if(!items.length)return null;
+        const cols=key==="sternside"?1:key==="drydock"&&yard==="anacortes"?1:key==="boathouse"?2:3;
+        return(
+          <div key={key} style={{marginBottom:"28px"}}>
+            <SecH label={label} sub={sub}/>
+            <div style={{display:"grid",gridTemplateColumns:`repeat(${cols},1fr)`,gap:"14px"}}>
+              {items.map(d=><DockCard key={d.id} dock={d} onRefresh={onRefresh}/>)}
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────
+// GANTT CALENDAR — navigable, dynamic window
+// ─────────────────────────────────────────────────────────────
+function Gantt({yard}){
+  const Y=YARDS[yard];
+  const[hov,setHov]=useState(null);
+
+  // Default: first of the month, 1 month before today
+  // → users immediately see recent history + upcoming work
+  const defaultStart=()=>new Date(TODAY.getFullYear(),TODAY.getMonth()-1,1);
+  const[calStart,setCalStart]=useState(defaultStart);
+
+  const shift=n=>setCalStart(s=>new Date(s.getFullYear(),s.getMonth()+n,1));
+  const jumpToToday=()=>setCalStart(defaultStart());
+
+  // Build a dynamic 4-month calendar from any start date
+  const buildCal=start=>{
+    const months=[];
+    let total=0;
+    for(let i=0;i<4;i++){
+      const d=new Date(start.getFullYear(),start.getMonth()+i,1);
+      const days=new Date(d.getFullYear(),d.getMonth()+1,0).getDate();
+      // Show year when crossing a calendar year or on the first visible month
+      const crossYear=d.getFullYear()!==start.getFullYear();
+      const label=d.toLocaleDateString('en-US',{month:'long'})+(crossYear||i===0?` ${d.getFullYear()}`:'');
+      months.push({n:label,d:days});
+      total+=days;
+    }
+    const divs=[];
+    let cum=0;
+    for(let i=0;i<3;i++){cum+=months[i].d;divs.push((cum/total)*100);}
+    return{months,divs,total};
+  };
+
+  const{months:MONTHS,divs:DIVS,total:CAL_D}=buildCal(calStart);
+  const CAL_S=calStart;
+
+  // TODAY marker — hide cleanly when outside the visible window
+  const todayOffset=Math.round((TODAY-CAL_S)/86400000);
+  const TDPCT=todayOffset>=0&&todayOffset<=CAL_D?(todayOffset/CAL_D)*100:null;
+
+  // Range label for header
+  const endDate=new Date(calStart.getFullYear(),calStart.getMonth()+4,0);
+  const rangeLabel=`${calStart.toLocaleDateString('en-US',{month:'short',year:'numeric'})} — ${endDate.toLocaleDateString('en-US',{month:'short',year:'numeric'})}`;
+
+  const LW=140;
+
+  // Bar geometry — uses parseDate to avoid UTC offset issues
+  const geom=(a,d)=>{
+    const sd=Math.round((parseDate(a)-CAL_S)/86400000);
+    const ed=Math.round((parseDate(d)-CAL_S)/86400000);
+    if(ed<=0||sd>=CAL_D)return null;
+    const cs=Math.max(0,sd),ce=Math.min(CAL_D,ed);
+    return{
+      left:`${(cs/CAL_D)*100}%`,
+      width:`${((ce-cs)/CAL_D)*100}%`,
+      radius:`${sd<=0?0:4}px ${ed>=CAL_D?0:4}px ${ed>=CAL_D?0:4}px ${sd<=0?0:4}px`,
+    };
+  };
+
+  const rows=Y.ganttRows.map(k=>({
+    k,label:Y.ganttLabels[k],
+    bars:Y.schedule.filter(s=>s.berth===k)
+      .map(s=>{const g=geom(s.arrival,s.departure);return g?{...s,g,color:vColor(s.vessel)}:null;})
+      .filter(Boolean),
+  }));
+
+  const BTN={background:'rgba(255,255,255,0.05)',border:'1px solid rgba(255,255,255,0.1)',borderRadius:'6px',color:'#94a3b8',padding:'5px 13px',fontSize:'12px',fontWeight:600,cursor:'pointer'};
+  const BTN_TODAY={...BTN,background:'rgba(6,182,212,0.1)',color:'#06b6d4',border:'1px solid rgba(6,182,212,0.25)'};
+
+  return(
+    <div style={{background:"#0a1323",border:"1px solid rgba(255,255,255,0.08)",borderRadius:"10px",padding:"18px 18px 14px",marginBottom:"24px"}}>
+
+      {/* ── Header + nav controls ───────────────────────────── */}
+      <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:'14px',flexWrap:'wrap',gap:'8px'}}>
+        <span style={{fontSize:'11px',fontWeight:700,color:'#475569',letterSpacing:'0.1em'}}>DOCK AVAILABILITY CALENDAR</span>
+        <div style={{display:'flex',alignItems:'center',gap:'6px'}}>
+          <button onClick={()=>shift(-1)} style={BTN}>← Prev</button>
+          <span style={{fontSize:'12px',fontWeight:600,color:'#64748b',minWidth:'168px',textAlign:'center'}}>{rangeLabel}</span>
+          <button onClick={jumpToToday} style={BTN_TODAY}>Today</button>
+          <button onClick={()=>shift(1)}  style={BTN}>Next →</button>
+        </div>
+      </div>
+
+      {/* ── Gantt grid ──────────────────────────────────────── */}
+      <div style={{display:'flex'}}>
+        {/* Row labels */}
+        <div style={{width:LW+'px',flexShrink:0}}>
+          <div style={{height:'24px'}}/>
+          {rows.map(({k,label})=>(
+            <div key={k} style={{height:'32px',display:'flex',alignItems:'center',justifyContent:'flex-end',paddingRight:'10px'}}>
+              <span style={{fontSize:'10px',fontWeight:600,color:'#64748b',textAlign:'right',lineHeight:1.2}}>{label}</span>
+            </div>
+          ))}
+        </div>
+
+        {/* Calendar area */}
+        <div style={{flex:1,minWidth:0,position:'relative'}}>
+          {/* Month headers */}
+          <div style={{display:'flex',height:'24px'}}>
+            {MONTHS.map((m,i)=>(
+              <div key={m.n} style={{flex:`${m.d} 0 0`,fontSize:'10px',fontWeight:700,color:'#475569',letterSpacing:'0.06em',textAlign:'center',lineHeight:'24px',borderLeft:i>0?'1px solid rgba(255,255,255,0.06)':'none'}}>
+                {m.n.toUpperCase()}
+              </div>
+            ))}
+          </div>
+
+          <div style={{position:'relative'}}>
+            {/* Month dividers */}
+            {DIVS.map((p,i)=>(
+              <div key={i} style={{position:'absolute',left:`${p}%`,top:0,bottom:0,width:'1px',background:'rgba(255,255,255,0.05)',zIndex:1}}/>
+            ))}
+
+            {/* TODAY marker — hidden when out of window */}
+            {TDPCT!==null&&(
+              <div style={{position:'absolute',left:`${TDPCT}%`,top:'-30px',bottom:0,width:'1px',background:'rgba(251,191,36,0.5)',zIndex:10}}>
+                <div style={{position:'absolute',top:0,left:'50%',transform:'translateX(-50%)',background:'#f59e0b',color:'#000',fontSize:'9px',fontWeight:700,padding:'2px 5px',borderRadius:'3px',whiteSpace:'nowrap'}}>TODAY</div>
+              </div>
+            )}
+
+            {/* Vessel bars */}
+            {rows.map(({k,bars},ri)=>(
+              <div key={k} style={{position:'relative',height:'32px',borderBottom:'1px solid rgba(255,255,255,0.04)',display:'flex',alignItems:'center'}}>
+                {bars.map((bar,bi)=>(
+                  <div key={bi} onMouseEnter={()=>setHov(`${ri}-${bi}`)} onMouseLeave={()=>setHov(null)}
+                    style={{position:'absolute',left:bar.g.left,width:bar.g.width,height:'22px',background:bar.color,borderRadius:bar.g.radius,display:'flex',alignItems:'center',paddingLeft:'7px',overflow:'hidden',cursor:'default',opacity:0.87,zIndex:2}}>
+                    <span style={{fontSize:'10px',fontWeight:700,color:'#fff',whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis',textShadow:'0 1px 3px rgba(0,0,0,0.7)'}}>{bar.vessel}</span>
+                    {hov===`${ri}-${bi}`&&(
+                      <div style={{position:'absolute',left:0,top:'26px',background:'#1a2d45',border:'1px solid rgba(255,255,255,0.13)',borderRadius:'7px',padding:'10px 13px',zIndex:100,minWidth:'170px',pointerEvents:'none',boxShadow:'0 6px 20px rgba(0,0,0,0.5)'}}>
+                        <div style={{fontSize:'12px',fontWeight:700,color:'#e2e8f0',marginBottom:'3px'}}>{bar.vessel}</div>
+                        <div style={{fontSize:'11px',color:'#64748b',marginBottom:'2px'}}>{fmtS(bar.arrival)} → {fmtS(bar.departure)}</div>
+                        {bar.loa&&<div style={{fontSize:'11px',color:'#64748b'}}>LOA: {bar.loa}ft</div>}
+                        <div style={{fontSize:'10px',color:'#334155',marginTop:'3px'}}>{k}</div>
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+
+      {/* ── Vessel colour legend ─────────────────────────────── */}
+      <div style={{display:'flex',flexWrap:'wrap',gap:'10px',marginTop:'12px',paddingLeft:LW+'px'}}>
+        {[...new Set(Y.schedule.map(s=>s.vessel))].map(v=>(
+          <div key={v} style={{display:'flex',alignItems:'center',gap:'5px'}}>
+            <div style={{width:'10px',height:'10px',borderRadius:'2px',background:vColor(v)}}/>
+            <span style={{fontSize:'10px',color:'#4b5563'}}>{v}</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+
+// ─────────────────────────────────────────────────────────────
+// SCHEDULE
+// ─────────────────────────────────────────────────────────────
+function Schedule({yard}){
+  const Y=YARDS[yard];
+  const active=[...Y.docks].filter(d=>d.vessel?.departure).sort((a,b)=>dFrom(a.vessel.departure)-dFrom(b.vessel.departure));
+  return(
+    <div>
+      <div style={{marginBottom:"20px"}}>
+        <h1 style={{fontFamily:"'Barlow Condensed',sans-serif",fontSize:"32px",fontWeight:700,color:"#f1f5f9"}}>Schedule</h1>
+        <p style={{fontSize:"13px",color:"#64748b",marginTop:"5px"}}>Upcoming departures and dock availability — {Y.label}</p>
+      </div>
+      <Gantt yard={yard}/>
+      <SecH label="Active Assignments — Sorted by Departure"/>
+      {active.length===0&&<div style={{background:"#0d1728",border:"1px solid rgba(255,255,255,0.07)",borderRadius:"10px",padding:"28px",textAlign:"center",color:"#334155"}}>No active vessel assignments at this yard.</div>}
+      <div style={{display:"flex",flexDirection:"column",gap:"8px"}}>
+        {active.map(dock=>{
+          const rem=dFrom(dock.vessel.departure),dep=rem<=7,vc=vColor(dock.vessel.name);
+          return(
+            <div key={dock.id} style={{background:"#0d1728",border:`1px solid ${dep?"rgba(245,158,11,0.4)":"rgba(255,255,255,0.07)"}`,borderLeft:`3px solid ${vc}`,borderRadius:"10px",padding:"16px 20px",display:"flex",alignItems:"center",gap:"16px"}}>
+              <div style={{width:"54px",height:"54px",borderRadius:"10px",flexShrink:0,background:dep?"rgba(245,158,11,0.18)":"rgba(100,116,139,0.13)",display:"flex",alignItems:"center",justifyContent:"center",fontFamily:"'Barlow Condensed',sans-serif",fontSize:"18px",fontWeight:700,color:dep?"#f59e0b":"#64748b"}}>{rem}d</div>
+              <div style={{flex:1}}>
+                <div style={{display:"flex",alignItems:"center",gap:"8px",marginBottom:"4px",flexWrap:"wrap"}}>
+                  <span style={{fontWeight:700,fontSize:"16px",color:"#e2e8f0"}}>{dock.vessel.name}</span>
+                  <span style={{fontSize:"12px",color:"#475569"}}>at</span>
+                  <span style={{fontSize:"13px",color:vc,fontWeight:600}}>{dock.fullName||dock.name}</span>
+                </div>
+                <div style={{fontSize:"11px",color:"#475569"}}>{fmt(dock.vessel.arrival)} → {fmt(dock.vessel.departure)}</div>
+              </div>
+              {dep?<span style={{color:"#f59e0b",fontSize:"13px",fontWeight:700,whiteSpace:"nowrap"}}>Departing soon</span>
+                 :<span style={{color:"#64748b",fontSize:"12px",whiteSpace:"nowrap"}}>{rem} days left</span>}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────
+// VESSELS
+// ─────────────────────────────────────────────────────────────
+function Vessels({yard}){
+  const Y=YARDS[yard];
+  const sorted=[...Y.schedule].sort((a,b)=>parseDate(a.arrival)-parseDate(b.arrival));
+  return(
+    <div>
+      <div style={{marginBottom:"20px"}}>
+        <h1 style={{fontFamily:"'Barlow Condensed',sans-serif",fontSize:"32px",fontWeight:700,color:"#f1f5f9"}}>Vessel Registry</h1>
+        <p style={{fontSize:"13px",color:"#64748b",marginTop:"5px"}}>{new Date().getFullYear()} vessel schedule — {Y.label}</p>
+      </div>
+      <div style={{background:"#0d1728",border:"1px solid rgba(255,255,255,0.07)",borderRadius:"10px",overflow:"hidden"}}>
+        <div style={{display:"grid",gridTemplateColumns:"2fr 1.2fr 0.8fr 1.2fr 1.2fr 0.7fr",padding:"11px 18px",borderBottom:"1px solid rgba(255,255,255,0.08)",fontSize:"10px",color:"#475569",fontWeight:700,letterSpacing:"0.08em"}}>
+          {["VESSEL","BERTH","LOA","ARRIVAL","DEPARTURE","STATUS"].map(c=><span key={c}>{c}</span>)}
+        </div>
+        {sorted.map((s,i)=>{
+          const isPast=parseDate(s.departure)<TODAY,isActive=!isPast&&parseDate(s.arrival)<=TODAY;
+          return(
+            <div key={i} className="rh" style={{display:"grid",gridTemplateColumns:"2fr 1.2fr 0.8fr 1.2fr 1.2fr 0.7fr",padding:"12px 18px",alignItems:"center",opacity:isPast?0.35:1,borderBottom:i<sorted.length-1?"1px solid rgba(255,255,255,0.04)":"none"}}>
+              <div style={{display:"flex",alignItems:"center",gap:"9px"}}>
+                <div style={{width:"8px",height:"8px",borderRadius:"2px",background:vColor(s.vessel),flexShrink:0}}/>
+                <span style={{fontSize:"13px",color:"#e2e8f0",fontWeight:500}}>{s.vessel}</span>
+              </div>
+              <span style={{fontSize:"12px",color:"#64748b"}}>{s.berth}</span>
+              <span style={{fontFamily:"'JetBrains Mono',monospace",fontSize:"11px",color:"#64748b"}}>{s.loa?s.loa+"ft":"—"}</span>
+              <span style={{fontSize:"12px",color:"#64748b"}}>{fmtS(s.arrival)}</span>
+              <span style={{fontSize:"12px",color:"#64748b"}}>{fmtS(s.departure)}</span>
+              <span style={{fontSize:"11px",fontWeight:600,color:isPast?"#334155":isActive?"#10b981":"#60a5fa"}}>{isPast?"Departed":isActive?"In Dock":"Upcoming"}</span>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────
+// LEADS
+// ─────────────────────────────────────────────────────────────
+const LSC={
+  'New — Needs Review': {color:'#60a5fa',bg:'rgba(96,165,250,0.12)', border:'rgba(96,165,250,0.3)'},
+  'Contacted':          {color:'#f59e0b',bg:'rgba(245,158,11,0.12)', border:'rgba(245,158,11,0.3)'},
+  'Quoted':             {color:'#06b6d4',bg:'rgba(6,182,212,0.12)',  border:'rgba(6,182,212,0.3)'},
+  'Moved to Pipeline':  {color:'#10b981',bg:'rgba(16,185,129,0.12)', border:'rgba(16,185,129,0.3)'},
+  'Closed — Lost':      {color:'#f87171',bg:'rgba(248,113,113,0.12)',border:'rgba(248,113,113,0.3)'},
+};
+
+function LeadBadge({status}){
+  const s=LSC[status]||LSC['New — Needs Review'];
+  return <span style={{background:s.bg,color:s.color,border:`1px solid ${s.border}`,padding:'2px 8px',borderRadius:'4px',fontSize:'11px',fontWeight:700,whiteSpace:'nowrap'}}>{status}</span>;
+}
+
+function LeadRow({lead,isExpanded,onToggle,onStatusChange,onMoveToPipeline,saving,isLast}){
+  const servicesArr=(lead.services||'').split(',').map(s=>s.trim()).filter(Boolean);
+  const servicesShort=servicesArr.slice(0,2).join(', ')+(servicesArr.length>2?` +${servicesArr.length-2}`:'');
+  const INP={background:'rgba(255,255,255,0.05)',border:'1px solid rgba(255,255,255,0.1)',borderRadius:'6px',color:'#e2e8f0',padding:'6px 10px',fontSize:'12px',fontFamily:"'Barlow',sans-serif",outline:'none'};
+
+  // Local state for status editing — prevents accidental auto-saves
+  const [localStatus,setLocalStatus] = useState(lead.status);
+  const [lostReason,setLostReason]   = useState(lead.lostReason||'');
+  const isDirty = localStatus !== lead.status ||
+    (localStatus==='Closed — Lost' && lostReason.trim() !== (lead.lostReason||'').trim());
+
+  const alreadyMoved=lead.status==='Moved to Pipeline'||lead.status==='Closed — Lost';
+  return(
+    <>
+      <div onClick={onToggle} className="rh"
+        style={{display:'grid',gridTemplateColumns:'0.8fr 1.2fr 1.2fr 0.7fr 1.6fr 0.8fr 1.4fr',padding:'12px 16px',alignItems:'center',cursor:'pointer',borderBottom:(!isLast||isExpanded)?'1px solid rgba(255,255,255,0.04)':'none',background:isExpanded?'rgba(255,255,255,0.025)':'transparent'}}>
+        <span style={{fontSize:'11px',color:'#64748b'}}>{lead.submitted?fmtS(lead.submitted):'—'}</span>
+        <div style={{display:'flex',alignItems:'center',gap:'7px'}}>
+          <div style={{width:'7px',height:'7px',borderRadius:'2px',background:vColor(lead.vessel),flexShrink:0}}/>
+          <span style={{fontSize:'13px',color:'#e2e8f0',fontWeight:500}}>{lead.vessel||'—'}</span>
+        </div>
+        <span style={{fontSize:'12px',color:'#94a3b8'}}>{lead.company||'—'}</span>
+        <span style={{fontSize:'11px',color:'#60a5fa'}}>{lead.yard==='No Preference'?'Any':lead.yard||'—'}</span>
+        <span style={{fontSize:'11px',color:'#64748b',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{servicesShort||'—'}</span>
+        <span style={{fontSize:'11px',color:'#64748b'}}>{lead.arrival?fmtS(lead.arrival):'—'}</span>
+        <LeadBadge status={lead.status}/>
+      </div>
+
+      {isExpanded&&(
+        <div style={{padding:'16px 20px',background:'rgba(255,255,255,0.018)',borderBottom:!isLast?'1px solid rgba(255,255,255,0.06)':'none'}}>
+          {/* Three info cards */}
+          <div style={{display:'grid',gridTemplateColumns:'1fr 1fr 1fr',gap:'12px',marginBottom:'14px'}}>
+            {/* Contact */}
+            <div style={{background:'#0a1828',borderRadius:'8px',padding:'12px 14px'}}>
+              <div style={{fontSize:'10px',fontWeight:700,color:'#334155',letterSpacing:'0.1em',marginBottom:'9px'}}>CONTACT</div>
+              {[['Name',`${lead.firstName} ${lead.lastName}`.trim()||'—'],['Company',lead.company||'—'],['Email',lead.email||'—'],['Phone',lead.phone||'—'],['Assigned Rep',lead.assignedRep||'Unassigned']].map(([k,v])=>(
+                <div key={k} style={{display:'flex',justifyContent:'space-between',gap:'8px',marginBottom:'5px'}}>
+                  <span style={{fontSize:'11px',color:'#475569',flexShrink:0}}>{k}</span>
+                  <span style={{fontSize:'11px',color:'#94a3b8',textAlign:'right',wordBreak:'break-all'}}>{v}</span>
+                </div>
+              ))}
+            </div>
+            {/* Vessel */}
+            <div style={{background:'#0a1828',borderRadius:'8px',padding:'12px 14px'}}>
+              <div style={{fontSize:'10px',fontWeight:700,color:'#334155',letterSpacing:'0.1em',marginBottom:'9px'}}>VESSEL</div>
+              {[['Name',lead.vessel||'—'],['Type',lead.vesselType||'—'],['Yard Pref',lead.yard||'—'],['Dimensions',lead.loa?`${lead.loa}ft LOA · ${lead.beam||'?'}ft Beam · ${lead.draft||'?'}ft Draft`:'—']].map(([k,v])=>(
+                <div key={k} style={{display:'flex',justifyContent:'space-between',gap:'8px',marginBottom:'5px'}}>
+                  <span style={{fontSize:'11px',color:'#475569',flexShrink:0}}>{k}</span>
+                  <span style={{fontSize:'11px',color:'#94a3b8',textAlign:'right'}}>{v}</span>
+                </div>
+              ))}
+            </div>
+            {/* Work Request */}
+            <div style={{background:'#0a1828',borderRadius:'8px',padding:'12px 14px'}}>
+              <div style={{fontSize:'10px',fontWeight:700,color:'#334155',letterSpacing:'0.1em',marginBottom:'9px'}}>WORK REQUEST</div>
+              {[['Est. Arrival',lead.arrival?fmt(lead.arrival):'—'],['Duration',lead.duration?`${lead.duration} days`:'—'],['Budget',lead.budget||'—']].map(([k,v])=>(
+                <div key={k} style={{display:'flex',justifyContent:'space-between',gap:'8px',marginBottom:'5px'}}>
+                  <span style={{fontSize:'11px',color:'#475569',flexShrink:0}}>{k}</span>
+                  <span style={{fontSize:'11px',color:'#94a3b8',textAlign:'right'}}>{v}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          {/* Services tags */}
+          {servicesArr.length>0&&(
+            <div style={{marginBottom:'12px'}}>
+              <div style={{fontSize:'10px',fontWeight:700,color:'#334155',letterSpacing:'0.1em',marginBottom:'7px'}}>SERVICES REQUESTED</div>
+              <div style={{display:'flex',flexWrap:'wrap',gap:'5px'}}>
+                {servicesArr.map(s=><span key={s} style={{background:'rgba(6,182,212,0.08)',border:'1px solid rgba(6,182,212,0.2)',color:'#06b6d4',borderRadius:'4px',padding:'2px 9px',fontSize:'11px'}}>{s}</span>)}
+              </div>
+            </div>
+          )}
+
+          {/* Description */}
+          {lead.description&&(
+            <div style={{marginBottom:'14px'}}>
+              <div style={{fontSize:'10px',fontWeight:700,color:'#334155',letterSpacing:'0.1em',marginBottom:'6px'}}>PROJECT DESCRIPTION</div>
+              <div style={{fontSize:'12px',color:'#94a3b8',lineHeight:'1.65',background:'#0a1828',borderRadius:'6px',padding:'10px 12px'}}>{lead.description}</div>
+            </div>
+          )}
+
+          {/* Lost reason — shown for existing Closed — Lost leads */}
+          {lead.status==='Closed — Lost'&&lead.lostReason&&(
+            <div style={{marginBottom:'14px'}}>
+              <div style={{fontSize:'10px',fontWeight:700,color:'#f87171',letterSpacing:'0.1em',marginBottom:'6px'}}>LOST REASON</div>
+              <div style={{fontSize:'12px',color:'#94a3b8',lineHeight:'1.65',background:'rgba(248,113,113,0.06)',border:'1px solid rgba(248,113,113,0.15)',borderRadius:'6px',padding:'10px 12px'}}>{lead.lostReason}</div>
+            </div>
+          )}
+
+          {/* Actions */}
+          <div style={{display:'flex',flexDirection:'column',gap:'8px'}}>
+            <div style={{display:'flex',alignItems:'flex-end',gap:'10px',flexWrap:'wrap'}}>
+              <div style={{flex:'0 0 auto'}}>
+                <label style={{fontSize:'11px',color:'#64748b',display:'block',marginBottom:'4px'}}>Update Status</label>
+                <select value={localStatus} onChange={e=>setLocalStatus(e.target.value)} disabled={saving}
+                  style={{...INP,cursor:'pointer',background:'#0f2044',color:'#e2e8f0'}}>
+                  {Object.keys(LSC).map(s=><option key={s} value={s} style={{background:'#0f2044',color:'#e2e8f0'}}>{s}</option>)}
+                </select>
+              </div>
+              {!alreadyMoved&&lead.status!=='Closed — Lost'&&(
+                <button onClick={onMoveToPipeline} disabled={saving}
+                  style={{background:'rgba(16,185,129,0.14)',color:'#10b981',border:'1px solid rgba(16,185,129,0.35)',padding:'8px 18px',borderRadius:'6px',fontSize:'13px',fontWeight:600,cursor:saving?'default':'pointer',whiteSpace:'nowrap'}}>
+                  {saving?'Moving…':'→ Move to Pipeline'}
+                </button>
+              )}
+              {lead.status==='Moved to Pipeline'&&<span style={{fontSize:'12px',color:'#10b981'}}>✓ Already in Pipeline</span>}
+            </div>
+
+            {/* Lost reason textarea — appears when Closed — Lost is selected */}
+            {localStatus==='Closed — Lost'&&(
+              <div>
+                <label style={{fontSize:'11px',color:'#f87171',display:'block',marginBottom:'4px'}}>Lost Reason <span style={{color:'#64748b'}}>(required)</span></label>
+                <textarea value={lostReason} onChange={e=>setLostReason(e.target.value)}
+                  placeholder="Why was this opportunity lost? (e.g. price, timing, went with competitor...)"
+                  style={{...INP,resize:'vertical',minHeight:'64px',width:'100%',borderColor:'rgba(248,113,113,0.25)'}}/>
+              </div>
+            )}
+
+            {/* Save button — only shown when there are unsaved changes */}
+            {isDirty&&(
+              <div>
+                <button onClick={()=>{
+                  // If setting to Moved to Pipeline for first time, use moveToPipeline
+                  // so a Pipeline row is created (not just a status label update)
+                  if(localStatus==='Moved to Pipeline'&&lead.status!=='Moved to Pipeline'){
+                    onMoveToPipeline();
+                  } else {
+                    onStatusChange(localStatus,lostReason);
+                  }
+                }} disabled={saving||(localStatus==='Closed — Lost'&&!lostReason.trim())}
+                  style={{background:'rgba(6,182,212,0.14)',color:'#06b6d4',border:'1px solid rgba(6,182,212,0.35)',padding:'8px 20px',borderRadius:'6px',fontSize:'13px',fontWeight:600,cursor:(saving||(localStatus==='Closed — Lost'&&!lostReason.trim()))?'default':'pointer'}}>
+                  {saving?'Saving…':localStatus==='Moved to Pipeline'&&lead.status!=='Moved to Pipeline'?'→ Move to Pipeline':'Save Status'}
+                </button>
+                {localStatus==='Closed — Lost'&&!lostReason.trim()&&(
+                  <span style={{fontSize:'11px',color:'#f87171',marginLeft:'10px'}}>A lost reason is required</span>
+                )}
+                {localStatus==='Moved to Pipeline'&&lead.status!=='Moved to Pipeline'&&(
+                  <span style={{fontSize:'11px',color:'#10b981',marginLeft:'10px'}}>This will create an entry in the Pipeline tab</span>
+                )}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+    </>
+  );
+}
+
+function LeadsView({onRefresh,refreshKey}){
+  const[expanded,setExpanded]=useState(null);
+  const[filter,setFilter]    =useState('all');
+  const[saving,setSaving]    =useState(null);
+  const[statusErr,setStatusErr]=useState(null);
+
+  const filtered=LEADS.filter(l=>filter==='all'||l.status===filter);
+
+  const updateStatus=async(lead,newStatus,lostReason='')=>{
+    setSaving(lead._rowId);setStatusErr(null);
+    const payload={'Lead Status':newStatus};
+    if(newStatus==='Closed — Lost'&&lostReason.trim())
+      payload['Lost Reason']=lostReason.trim();
+    try{
+      const r=await apiFetch(`/api/leads/${lead._rowId}`,{method:'PUT',body:JSON.stringify(payload)});
+      if(r.ok){onRefresh();}
+      else{const d=await r.json().catch(()=>({}));setStatusErr(d.error||`Status update failed (${r.status})`);}
+    }catch(e){setStatusErr(e.message||'Status update failed — check your connection');}
+    finally{setSaving(null);}
+  };
+
+  const[moveError,setMoveError]=useState(null);
+
+  const moveToPipeline=async(lead)=>{
+    setSaving(lead._rowId);
+    setMoveError(null);
+    try{
+      // Quarter must be Q1/Q2/Q3/Q4 — Pipeline has PICKLIST validation
+      const q=lead.arrival?`Q${Math.ceil((parseDate(lead.arrival).getMonth()+1)/3)}`:'Q3';
+      // Yard must match Pipeline PICKLIST: Ballard, Anacortes, Off Site, Northlake
+      // Intake form stores "Ballard (Seattle)" — strip the suffix
+      const YARD_MAP={'Ballard (Seattle)':'Ballard','Anacortes':'Anacortes','Ballard':'Ballard','Off Site':'Off Site'};
+      const yardName=YARD_MAP[lead.yard]||null;
+      const pipelinePayload={
+        'Vessel Name':lead.vessel,
+        'Status':'Lead',
+        'Quarter':q,
+        'Value ($)':0,
+        'Notes':`[From Intake] Services: ${lead.services||'—'} | ${lead.description||''}`.trim(),
+        'Period':lead.arrival||'',
+      };
+      // Only include Yard if it maps to a valid Pipeline option (validation is ON)
+      if(yardName) pipelinePayload['Yard']=yardName;
+      const pR=await apiFetch('/api/pipeline',{method:'POST',body:JSON.stringify(pipelinePayload)});
+      if(!pR.ok){
+        const err=await pR.json();
+        throw new Error(`Pipeline POST failed: ${JSON.stringify(err)}`);
+      }
+      await apiFetch(`/api/leads/${lead._rowId}`,{method:'PUT',body:JSON.stringify({'Lead Status':'Moved to Pipeline'})});
+      setExpanded(null);
+      onRefresh();
+    }catch(e){
+      console.error('moveToPipeline error:',e);
+      setMoveError(e.message);
+    }
+    finally{setSaving(null);}
+  };
+
+  const newCount=    LEADS.filter(l=>l.status==='New — Needs Review').length;
+  const contacted=   LEADS.filter(l=>l.status==='Contacted').length;
+  const quoted=      LEADS.filter(l=>l.status==='Quoted').length;
+  const inPipeline=  LEADS.filter(l=>l.status==='Moved to Pipeline').length;
+
+  return(
+    <div>
+      <div style={{marginBottom:'20px'}}>
+        <h1 style={{fontFamily:"'Barlow Condensed',sans-serif",fontSize:'32px',fontWeight:700,color:'#f1f5f9'}}>Leads</h1>
+        <p style={{fontSize:'13px',color:'#64748b',marginTop:'5px'}}>Incoming quote requests &amp; scheduling inquiries · Both yards · Newest first</p>
+      </div>
+
+      {/* Summary cards */}
+      <div style={{display:'grid',gridTemplateColumns:'repeat(5,1fr)',gap:'10px',marginBottom:'20px'}}>
+        {[['Total Leads',LEADS.length,'#e2e8f0'],['New — Needs Review',newCount,'#60a5fa'],['Contacted',contacted,'#f59e0b'],['Quoted',quoted,'#06b6d4'],['In Pipeline',inPipeline,'#10b981']].map(([label,val,color])=>(
+          <div key={label} style={{background:'#0d1728',border:'1px solid rgba(255,255,255,0.07)',borderRadius:'10px',padding:'16px 18px'}}>
+            <div style={{fontSize:'11px',color:'#64748b',marginBottom:'8px'}}>{label}</div>
+            <div style={{fontFamily:"'Barlow Condensed',sans-serif",fontSize:'32px',fontWeight:700,color}}>{val}</div>
+          </div>
+        ))}
+      </div>
+
+      {/* Filter pills */}
+      <div style={{display:'flex',gap:'6px',marginBottom:'14px',flexWrap:'wrap',alignItems:'center'}}>
+        {['all',...Object.keys(LSC)].map(s=>(
+          <button key={s} onClick={()=>setFilter(s)}
+            style={{background:filter===s?'rgba(6,182,212,0.15)':'transparent',color:filter===s?'#06b6d4':'#64748b',border:filter===s?'1px solid rgba(6,182,212,0.35)':'1px solid rgba(255,255,255,0.08)',padding:'5px 14px',borderRadius:'6px',fontSize:'12px',fontWeight:500,cursor:'pointer'}}>
+            {s==='all'?'All Leads':s}
+          </button>
+        ))}
+        <span style={{fontSize:'11px',color:'#334155',marginLeft:'4px'}}>{filtered.length} records</span>
+      </div>
+
+      {/* Move error — shown if Pipeline row creation fails */}
+      {moveError&&(
+        <div style={{background:'rgba(248,113,113,0.1)',border:'1px solid rgba(248,113,113,0.3)',borderRadius:'8px',padding:'10px 16px',marginBottom:'14px',fontSize:'12px',color:'#f87171',display:'flex',justifyContent:'space-between',alignItems:'center'}}>
+          <span>⚠ Pipeline row creation failed: {moveError}</span>
+          <button onClick={()=>setMoveError(null)} style={{background:'transparent',border:'none',color:'#f87171',cursor:'pointer',fontSize:'16px',lineHeight:1}}>×</button>
+        </div>
+      )}
+
+      {/* Status update error */}
+      {statusErr&&(
+        <div style={{background:'rgba(248,113,113,0.1)',border:'1px solid rgba(248,113,113,0.3)',borderRadius:'8px',padding:'10px 16px',marginBottom:'14px',fontSize:'12px',color:'#f87171',display:'flex',justifyContent:'space-between',alignItems:'center'}}>
+          <span>⚠ {statusErr}</span>
+          <button onClick={()=>setStatusErr(null)} style={{background:'transparent',border:'none',color:'#f87171',cursor:'pointer',fontSize:'16px',lineHeight:1}}>×</button>
+        </div>
+      )}
+
+      {/* Table */}
+      <div style={{background:'#0d1728',border:'1px solid rgba(255,255,255,0.07)',borderRadius:'10px',overflow:'hidden'}}>
+        <div style={{display:'grid',gridTemplateColumns:'0.8fr 1.2fr 1.2fr 0.7fr 1.6fr 0.8fr 1.4fr',padding:'10px 16px',borderBottom:'1px solid rgba(255,255,255,0.08)',fontSize:'10px',color:'#475569',fontWeight:700,letterSpacing:'0.08em'}}>
+          {['SUBMITTED','VESSEL','COMPANY','YARD','SERVICES','EST. ARRIVAL','STATUS'].map(c=><span key={c}>{c}</span>)}
+        </div>
+        {filtered.length===0&&(
+          <div style={{padding:'32px',textAlign:'center',color:'#334155',fontSize:'13px'}}>No leads found.</div>
+        )}
+        {filtered.map((lead,i)=>(
+          <LeadRow key={lead._rowId}
+            lead={lead}
+            isExpanded={expanded===lead._rowId}
+            onToggle={()=>setExpanded(expanded===lead._rowId?null:lead._rowId)}
+            onStatusChange={(s,r)=>updateStatus(lead,s,r)}
+            onMoveToPipeline={()=>moveToPipeline(lead)}
+            saving={saving===lead._rowId}
+            isLast={i===filtered.length-1}
+          />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+
+function PipelineView(){
+  const[qF,setQF]=useState(0);
+  const[sF,setSF]=useState("all");
+  const filtered=PIPELINE.filter(p=>(qF===0||p.q===qF)&&(sF==="all"||p.status===sF));
+  const sum=s=>PIPELINE.filter(p=>p.status===s).reduce((a,p)=>a+p.value,0);
+  const total=PIPELINE.reduce((a,p)=>a+p.value,0);
+  return(
+    <div>
+      <div style={{marginBottom:"20px"}}>
+        <h1 style={{fontFamily:"'Barlow Condensed',sans-serif",fontSize:"32px",fontWeight:700,color:"#f1f5f9"}}>Pipeline — {new Date().getFullYear()}</h1>
+        <p style={{fontSize:"13px",color:"#64748b",marginTop:"5px"}}>Sales estimate tracker · Both yards · All quarters</p>
+      </div>
+      <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:"10px",marginBottom:"20px"}}>
+        {[["Closed – Won",sum("won"),"#10b981"],["Estimating",sum("estimating"),"#f59e0b"],["Active Leads",sum("lead"),"#60a5fa"],["Total Pipeline",total,"#e2e8f0"]].map(([label,val,color])=>(
+          <div key={label} style={{background:"#0d1728",border:"1px solid rgba(255,255,255,0.07)",borderRadius:"10px",padding:"16px 18px"}}>
+            <div style={{fontSize:"11px",color:"#64748b",marginBottom:"8px"}}>{label}</div>
+            <div style={{fontFamily:"'Barlow Condensed',sans-serif",fontSize:"28px",fontWeight:700,color}}>{fmtUSD(val)}</div>
+          </div>
+        ))}
+      </div>
+      <div style={{display:"flex",gap:"6px",marginBottom:"14px",flexWrap:"wrap",alignItems:"center"}}>
+        {[0,1,2,3,4].map(q=>(
+          <button key={q} onClick={()=>setQF(q)} style={{background:qF===q?"rgba(6,182,212,0.15)":"transparent",color:qF===q?"#06b6d4":"#64748b",border:qF===q?"1px solid rgba(6,182,212,0.35)":"1px solid rgba(255,255,255,0.08)",padding:"5px 14px",borderRadius:"6px",fontSize:"13px",fontWeight:500}}>
+            {q===0?"All Quarters":"Q"+q}
+          </button>
+        ))}
+        <div style={{width:"1px",height:"22px",background:"rgba(255,255,255,0.08)",margin:"0 2px"}}/>
+        {["all","won","estimating","lead","lost"].map(s=>(
+          <button key={s} onClick={()=>setSF(s)} style={{background:sF===s?"rgba(255,255,255,0.07)":"transparent",color:sF===s?"#e2e8f0":"#64748b",border:sF===s?"1px solid rgba(255,255,255,0.15)":"1px solid rgba(255,255,255,0.06)",padding:"5px 12px",borderRadius:"6px",fontSize:"12px"}}>
+            {s==="all"?"All Status":PSC[s]?.label}
+          </button>
+        ))}
+        <span style={{fontSize:"11px",color:"#334155",marginLeft:"4px"}}>{filtered.length} records</span>
+      </div>
+      <div style={{background:"#0d1728",border:"1px solid rgba(255,255,255,0.07)",borderRadius:"10px",overflow:"hidden"}}>
+        <div style={{display:"grid",gridTemplateColumns:"0.3fr 2fr 0.9fr 0.9fr 0.8fr 0.8fr 1.1fr",padding:"10px 16px",borderBottom:"1px solid rgba(255,255,255,0.08)",fontSize:"10px",color:"#475569",fontWeight:700,letterSpacing:"0.08em"}}>
+          {["Q","VESSEL","REP","LOCATION","PERIOD","VALUE","STATUS"].map(c=><span key={c}>{c}</span>)}
+        </div>
+        {filtered.map((p,i)=>(
+          <div key={i} className="rh" style={{display:"grid",gridTemplateColumns:"0.3fr 2fr 0.9fr 0.9fr 0.8fr 0.8fr 1.1fr",padding:"11px 16px",alignItems:"center",borderBottom:i<filtered.length-1?"1px solid rgba(255,255,255,0.04)":"none",opacity:p.status==="lost"?0.4:1}}>
+            <span style={{fontSize:"11px",color:"#334155",fontWeight:700}}>Q{p.q}</span>
+            <div>
+              <div style={{fontSize:"13px",color:"#e2e8f0",fontWeight:500}}>{p.vessel}</div>
+              {p.notes&&<div style={{fontSize:"11px",color:"#475569",marginTop:"2px"}}>{p.notes}</div>}
+            </div>
+            <span style={{fontSize:"12px",color:"#64748b"}}>{p.rep}</span>
+            <span style={{fontSize:"11px",color:"#60a5fa",fontFamily:"'JetBrains Mono',monospace"}}>{p.loc}</span>
+            <span style={{fontSize:"11px",color:"#64748b"}}>{p.pop}</span>
+            <span style={{fontFamily:"'Barlow Condensed',sans-serif",fontSize:"15px",fontWeight:700,color:p.status==="won"?"#10b981":p.status==="lost"?"#475569":"#f1f5f9"}}>{fmtUSD(p.value)}</span>
+            <PBadge status={p.status}/>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────
+// APP SHELL
+// ─────────────────────────────────────────────────────────────
+function App(){
+  const [ready,setReady]=useState(false);
+  const [err,setErr]    =useState(null);
+  const [yard,setYard]  =useState("ballard");
+  const [view,setView]  =useState("dashboard");
+  const [refreshKey,setRefreshKey]=useState(0);
+
+  // ── Auth gate ─────────────────────────────────────────────
+  const [token,setToken]=useState(()=>{
+    const saved=sessionStorage.getItem('dockops_token');
+    if(saved) API_TOKEN=saved;
+    return saved||'';
+  });
+  const [keyInput,setKeyInput] =useState('');
+  const [checking,setChecking] =useState(false);
+  const [authErr,setAuthErr]   =useState(false);
+
+  const handleRefresh=()=>{
+    loadFromSmartsheet()
+      .then(()=>setRefreshKey(k=>k+1))
+      .catch(e=>console.error('Refresh error:',e));
+  };
+
+  // useEffect MUST be before any early return (Rules of Hooks)
+  // Guard internally so it only runs once the token is set
+  useEffect(()=>{
+    if(!token) return;
+    loadFromSmartsheet().then(()=>setReady(true)).catch(e=>setErr(e.message));
+  },[token]);
+
+  // Auto-refresh every 5 minutes — keeps open tabs current without manual reload
+  useEffect(()=>{
+    if(!token) return;
+    const id=setInterval(()=>{
+      loadFromSmartsheet()
+        .then(()=>setRefreshKey(k=>k+1))
+        .catch(e=>console.warn('Auto-refresh failed:',e));
+    },5*60*1000);
+    return()=>clearInterval(id);
+  },[token]);
+
+  const tryLogin=async()=>{
+    const k=keyInput.trim();
+    if(!k)return;
+    setChecking(true);setAuthErr(false);
+    try{
+      const r=await fetch(`${API}/api/berths`,{headers:{Authorization:`Bearer ${k}`}});
+      if(r.ok){
+        API_TOKEN=k;
+        sessionStorage.setItem('dockops_token',k);
+        setToken(k);
+      } else { setAuthErr(true); }
+    }catch(e){ setAuthErr(true); }
+    finally{ setChecking(false); }
+  };
+
+  if(!token) return(
+    <div style={{display:'flex',alignItems:'center',justifyContent:'center',height:'100vh',flexDirection:'column',gap:'18px',background:'#080c14'}}>
+      <div style={{width:'48px',height:'48px',borderRadius:'10px',background:'linear-gradient(135deg,#0891b2,#06b6d4)',display:'flex',alignItems:'center',justifyContent:'center',fontSize:'24px'}}>⚓</div>
+      <div style={{textAlign:'center'}}>
+        <div style={{fontFamily:"'Barlow Condensed',sans-serif",fontSize:'28px',fontWeight:700,color:'#f1f5f9',letterSpacing:'0.02em'}}>DockOps</div>
+        <div style={{fontSize:'10px',color:'#2d4a6a',letterSpacing:'0.12em',marginTop:'3px'}}>STABBERT MARINE & INDUSTRIAL</div>
+      </div>
+      <div style={{display:'flex',flexDirection:'column',gap:'10px',width:'300px'}}>
+        <input type="password" placeholder="Enter access key"
+          value={keyInput} onChange={e=>setKeyInput(e.target.value)}
+          onKeyDown={e=>e.key==='Enter'&&tryLogin()}
+          style={{background:'rgba(255,255,255,0.05)',border:'1px solid rgba(255,255,255,0.12)',borderRadius:'8px',color:'#e2e8f0',padding:'11px 14px',fontSize:'14px',outline:'none',fontFamily:"'Barlow',sans-serif"}}/>
+        {authErr&&<div style={{fontSize:'12px',color:'#f87171',textAlign:'center'}}>Invalid access key — please try again</div>}
+        <button onClick={tryLogin} disabled={checking}
+          style={{background:'rgba(6,182,212,0.15)',color:'#06b6d4',border:'1px solid rgba(6,182,212,0.35)',padding:'11px',borderRadius:'8px',fontSize:'14px',fontWeight:600,cursor:checking?'default':'pointer'}}>
+          {checking?'Verifying…':'Access DockOps'}
+        </button>
+      </div>
+    </div>
+  );
+
+  const retry=()=>{
+    setErr(null);
+    loadFromSmartsheet().then(()=>setReady(true)).catch(e=>setErr(e.message));
+  };
+
+  if(err) return(
+    <div style={{display:"flex",alignItems:"center",justifyContent:"center",height:"100vh",flexDirection:"column",gap:"16px",background:"#080c14"}}>
+      <div style={{fontSize:"32px"}}>⚠️</div>
+      <div style={{fontFamily:"'Barlow Condensed',sans-serif",fontSize:"22px",fontWeight:700,color:"#f87171"}}>Smartsheet Connection Failed</div>
+      <div style={{fontSize:"13px",color:"#475569",maxWidth:"380px",textAlign:"center"}}>{err}</div>
+      <button onClick={retry} style={{marginTop:"8px",background:"rgba(6,182,212,0.12)",color:"#06b6d4",border:"1px solid rgba(6,182,212,0.3)",padding:"8px 22px",borderRadius:"6px",fontSize:"13px",fontWeight:600}}>
+        Retry Connection
+      </button>
+    </div>
+  );
+
+  if(!ready) return(
+    <div style={{display:"flex",alignItems:"center",justifyContent:"center",height:"100vh",flexDirection:"column",gap:"20px",background:"#080c14"}}>
+      <div style={{width:"44px",height:"44px",borderRadius:"10px",background:"linear-gradient(135deg,#0891b2,#06b6d4)",display:"flex",alignItems:"center",justifyContent:"center",fontSize:"22px"}}>⚓</div>
+      <div style={{fontFamily:"'Barlow Condensed',sans-serif",fontSize:"26px",fontWeight:700,color:"#f1f5f9",letterSpacing:"0.02em"}}>DockOps</div>
+      <div style={{fontSize:"13px",color:"#06b6d4"}}>Connecting to Smartsheet…</div>
+      <div style={{width:"220px",height:"3px",background:"rgba(255,255,255,0.08)",borderRadius:"2px",overflow:"hidden"}}>
+        <div style={{height:"100%",width:"35%",background:"linear-gradient(90deg,#0891b2,#06b6d4)",borderRadius:"2px",animation:"slideLoad 1.4s ease-in-out infinite"}}/>
+      </div>
+    </div>
+  );
+
+  const nav=[{id:"dashboard",label:"Dashboard"},{id:"vessels",label:"Vessels"},{id:"schedule",label:"Schedule"},{id:"pipeline",label:"Pipeline"},{id:"leads",label:"Leads"}];
+  return(
+    <div style={{minHeight:"100vh",background:"#080c14"}}>
+      <nav style={{background:"#09101f",borderBottom:"1px solid rgba(255,255,255,0.07)",padding:"0 24px",display:"flex",alignItems:"center",gap:"6px",height:"60px",position:"sticky",top:0,zIndex:100,flexWrap:"wrap"}}>
+        <div style={{display:"flex",alignItems:"center",gap:"10px",marginRight:"14px"}}>
+          <div style={{width:"36px",height:"36px",borderRadius:"8px",background:"linear-gradient(135deg,#0891b2,#06b6d4)",display:"flex",alignItems:"center",justifyContent:"center",fontSize:"17px"}}>⚓</div>
+          <div>
+            <div style={{fontFamily:"'Barlow Condensed',sans-serif",fontSize:"19px",fontWeight:700,color:"#f1f5f9",lineHeight:1}}>DockOps</div>
+            <div style={{fontSize:"9px",color:"#2d4a6a",letterSpacing:"0.08em",marginTop:"1px"}}>STABBERT MARINE & INDUSTRIAL</div>
+          </div>
+        </div>
+        <div style={{display:"flex",background:"rgba(255,255,255,0.04)",borderRadius:"7px",border:"1px solid rgba(255,255,255,0.09)",padding:"3px",marginRight:"12px",gap:"2px"}}>
+          {[{id:"ballard",label:"Ballard"},{id:"anacortes",label:"Anacortes"}].map(y=>(
+            <button key={y.id} onClick={()=>setYard(y.id)} style={{background:yard===y.id?"#0f2044":"transparent",color:yard===y.id?"#06b6d4":"#4b5563",border:"none",padding:"5px 16px",borderRadius:"5px",fontSize:"13px",fontWeight:600}}>{y.label}</button>
+          ))}
+        </div>
+        {nav.map(t=>{
+          const newLeads=t.id==='leads'?LEADS.filter(l=>l.status==='New — Needs Review').length:0;
+          return(
+            <button key={t.id} onClick={()=>setView(t.id)} style={{background:view===t.id?"rgba(6,182,212,0.12)":"transparent",color:view===t.id?"#06b6d4":"#64748b",border:view===t.id?"1px solid rgba(6,182,212,0.28)":"1px solid transparent",padding:"6px 14px",borderRadius:"6px",fontSize:"13px",fontWeight:500,display:'flex',alignItems:'center',gap:'6px'}}>
+              {t.label}
+              {newLeads>0&&<span style={{background:'#60a5fa',color:'#000',borderRadius:'10px',padding:'1px 6px',fontSize:'10px',fontWeight:700}}>{newLeads}</span>}
+            </button>
+          );
+        })}
+        <div style={{marginLeft:"auto",display:"flex",alignItems:"center",gap:"7px"}}>
+          <span style={{width:"7px",height:"7px",borderRadius:"50%",background:"#10b981",display:"inline-block",boxShadow:"0 0 8px rgba(16,185,129,0.5)"}}/>
+          <span style={{fontSize:"12px",color:"#475569"}}>Live · Smartsheet</span>
+        </div>
+      </nav>
+      <main style={{padding:"28px 24px",maxWidth:"1440px",margin:"0 auto"}}>
+        {view==="dashboard"&&<Dashboard yard={yard} onRefresh={handleRefresh} refreshKey={refreshKey}/>}
+        {view==="vessels"  &&<Vessels   yard={yard}/>}
+        {view==="schedule" &&<Schedule  yard={yard}/>}
+        {view==="pipeline" &&<PipelineView/>}
+        {view==="leads"    &&<LeadsView onRefresh={handleRefresh} refreshKey={refreshKey}/>}
+      </main>
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(<App/>);
+</script>
+</body>
+</html>
