@@ -163,7 +163,7 @@ app.put('/api/berths/:rowId', async (req, res) => {
       headers: HEADERS,
       body: JSON.stringify([{ id: parseInt(req.params.rowId), cells }])
     });
-    invalidate(SHEETS.berths);           // next GET will be fresh
+    if (r.ok) invalidate(SHEETS.berths); // only clear cache on successful write
     res.json(await r.json());
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -190,7 +190,7 @@ app.post('/api/schedule', async (req, res) => {
       headers: HEADERS,
       body: JSON.stringify([{ cells, toBottom: true }])
     });
-    invalidate(SHEETS.schedule);
+    if (r.ok) invalidate(SHEETS.schedule);
     res.json(await r.json());
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -206,7 +206,7 @@ app.put('/api/schedule/:rowId', async (req, res) => {
       headers: HEADERS,
       body: JSON.stringify([{ id: parseInt(req.params.rowId), cells }])
     });
-    invalidate(SHEETS.schedule);
+    if (r.ok) invalidate(SHEETS.schedule);
     res.json(await r.json());
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -219,7 +219,7 @@ app.delete('/api/schedule/:rowId', async (req, res) => {
       `${SS_BASE}/sheets/${SHEETS.schedule}/rows?rowIds=${req.params.rowId}&ignoreRowsNotFound=true`,
       { method: 'DELETE', headers: HEADERS }
     );
-    invalidate(SHEETS.schedule);
+    if (r.ok) invalidate(SHEETS.schedule);
     res.json(await r.json());
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -246,7 +246,7 @@ app.post('/api/pipeline', async (req, res) => {
       headers: HEADERS,
       body: JSON.stringify([{ cells, toBottom: true }])
     });
-    invalidate(SHEETS.pipeline);
+    if (r.ok) invalidate(SHEETS.pipeline);
     res.json(await r.json());
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -262,7 +262,7 @@ app.put('/api/pipeline/:rowId', async (req, res) => {
       headers: HEADERS,
       body: JSON.stringify([{ id: parseInt(req.params.rowId), cells }])
     });
-    invalidate(SHEETS.pipeline);
+    if (r.ok) invalidate(SHEETS.pipeline);
     res.json(await r.json());
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -275,7 +275,7 @@ app.delete('/api/pipeline/:rowId', async (req, res) => {
       `${SS_BASE}/sheets/${SHEETS.pipeline}/rows?rowIds=${req.params.rowId}&ignoreRowsNotFound=true`,
       { method: 'DELETE', headers: HEADERS }
     );
-    invalidate(SHEETS.pipeline);
+    if (r.ok) invalidate(SHEETS.pipeline);
     res.json(await r.json());
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -304,26 +304,32 @@ app.put('/api/leads/:rowId', async (req, res) => {
       headers: HEADERS,
       body: JSON.stringify([{ id: parseInt(req.params.rowId), cells }])
     });
-    invalidate(SHEETS.leads);
+    if (r.ok) invalidate(SHEETS.leads);
     res.json(await r.json());
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-
+// ─────────────────────────────────────────────────────────────
+// INTAKE  (public — no auth)
+// Accepts field key/value pairs directly; sheetId is hardcoded
+// server-side to prevent writes to arbitrary sheets.
+// ─────────────────────────────────────────────────────────────
 app.post('/api/intake', async (req, res) => {
+  if (!SHEETS.leads) return res.status(503).json({ error: 'SHEET_LEADS not configured' });
   try {
-    const { sheetId, row } = req.body;
-    const r = await fetch(`${SS_BASE}/sheets/${sheetId}/rows`, {
+    const colMap = await getColMap(SHEETS.leads);
+    const cells  = buildCells(colMap, req.body);
+    const r = await fetch(`${SS_BASE}/sheets/${SHEETS.leads}/rows`, {
       method: 'POST',
       headers: HEADERS,
-      body: JSON.stringify([row])
+      body: JSON.stringify([{ cells, toBottom: true }])
     });
     const data = await r.json();
     res.status(r.ok ? 200 : r.status).json(data);
   } catch (err) {
-    res.status(500).json({ message: err.message });
+    res.status(500).json({ error: err.message });
   }
 });
 
